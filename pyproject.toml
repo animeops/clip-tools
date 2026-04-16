@@ -43,9 +43,8 @@ build-backend = "hatchling.build"
 testpaths = ["tests"]
 addopts = "--cov=clip_tools"
 
-[tool.rye]
-managed = true
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.2.2",
     "pytest-cov>=5.0.0",
 ]
