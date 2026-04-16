@@ -1,0 +1,13 @@
+.DS_Store
+*.sw*
+.ipynb_checkpoints
+.vscode
+__pycache__
+*.egg-info
+build
+*.nsys-rep
+notebooks
+data
+*_backup
+temp*
+.coverage

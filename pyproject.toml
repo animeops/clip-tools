@@ -1,0 +1,57 @@
+[project]
+name = "clip-tools"
+version = "0.0.0"
+description = "Python package for working with CLIP STUDIO Paint files"
+authors = [
+    { name = "AnimeOps", email = "" }
+]
+dependencies = [
+    "pandas",
+    "numpy",
+    "Pillow",
+    "tqdm",
+    "psd_tools",
+    "shortuuid",
+    "opencv-python",
+    "pydantic>=2.7.4",
+]
+readme = "README.md"
+keywords = ["CLIP Studio Paint", "clip"]
+requires-python = ">=3.9"
+license = { text = "MIT License" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Multimedia :: Graphics :: Viewers",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=clip_tools"
+
+[tool.rye]
+managed = true
+dev-dependencies = [
+    "pytest>=8.2.2",
+    "pytest-cov>=5.0.0",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["clip_tools"]
