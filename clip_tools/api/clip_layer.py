@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import List, Tuple, Optional, Iterator
+from typing import Dict, List, Tuple, Optional, Iterator
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -30,7 +30,7 @@ class ClipLayer:
         idx: int,
         raster: dict,
         canvas_size: Tuple[int, int],
-        layer_map: Optional[dict] = None,
+        layer_map: Optional[Dict[int, int]] = None,
     ):
         """
         Args:

@@ -1,12 +1,13 @@
-from typing import Any, Dict, List, Tuple
+from typing import List, Tuple
 import numpy as np
+import pandas as pd
 from .offscreen_attributes import process_offscreen_attributes
 
 import struct
 
 
 def process_layer_blocks(
-    blocks: List[Tuple[int, bytes]], offscreen: Dict[str, Any]
+    blocks: List[Tuple[int, bytes]], offscreen: pd.Series
 ) -> np.ndarray:
     ALPHA_SUBBLOCK_WIDTH = 64
     PARAMETER_HEADER = "Parameter".encode("utf-16be")

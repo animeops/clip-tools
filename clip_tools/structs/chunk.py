@@ -1,6 +1,7 @@
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Union
 import struct
 import zlib
+import numpy as np
 import pandas as pd
 import logging
 
@@ -16,7 +17,7 @@ def process_chunk_binary(
     canvas_shape: Tuple[int, int],
     external_id_map: Dict[str, Dict[str, Any]],
     brush_styles: pd.DataFrame,
-) -> Tuple[Dict[str, Dict[int, bytes]], Dict[str, int]]:
+) -> Tuple[Dict[str, Union[Dict[int, bytes], np.ndarray]], Dict[str, int]]:
     CSF_CHUNK = b"CSFCHUNK"
     CHUNK_HEADER = b"CHNKHead"
     CHUNK_EXTERNAL = b"CHNKExta"

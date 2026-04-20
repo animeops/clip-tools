@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -14,9 +14,11 @@ from clip_tools.utils import arr_to_pil
 logger = logging.getLogger(__name__)
 
 
-def build_external_id_map(dfs: Dict[str, pd.DataFrame]) -> dict:
+def build_external_id_map(
+    dfs: Dict[str, pd.DataFrame],
+) -> Dict[str, Dict[str, Any]]:
     """Map each external chunk id to its owning table and column."""
-    external_id_map: dict = {}
+    external_id_map: Dict[str, Dict[str, Any]] = {}
     for _, row in dfs["ExternalTableAndColumnName"].iterrows():
         if row["TableName"] not in dfs:
             continue
@@ -82,10 +84,10 @@ def _save_debug_layer_image(arr: np.ndarray, name: str, key: str, mode: str) -> 
 
 def process_clip_data(
     name: str,
-    clip_data: dict,
+    clip_data: Dict[str, Union[Dict[int, bytes], np.ndarray]],
     dfs: Dict[str, pd.DataFrame],
     layer_df: pd.DataFrame,
-    external_id_map: dict,
+    external_id_map: Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[int, dict], List[dict]]:
     """Classify processed chunks into raster/vector layers and an auxiliary bucket."""
     raster_dict: Dict[int, dict] = {}
