@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 class ClipLayer:
-    text_attributes = {}
-    resizable_image_attributes = {}
-    composite_cache = {}
-
     def __init__(
         self,
         record: pd.DataFrame,
@@ -48,6 +44,10 @@ class ClipLayer:
         self._idx = idx
         self._raster = raster
         self._canvas_size = canvas_size
+
+        self._text_attrs = None
+        self._resizable_image_attrs = None
+        self._composited = None
 
         if layer_map is None:
             self._layer_map = {}
@@ -151,12 +151,12 @@ class ClipLayer:
                     f.write(layer_metadata["TextLayerAttributes"])
 
             try:
-                if self.layer_id not in ClipLayer.text_attributes:
-                    ClipLayer.text_attributes[self.layer_id] = process_text_attributes(
+                if self._text_attrs is None:
+                    self._text_attrs = process_text_attributes(
                         layer_metadata["TextLayerAttributes"]
                     )
 
-                attr_ds = ClipLayer.text_attributes[self.layer_id]
+                attr_ds = self._text_attrs
 
                 layer_offset_x = (
                     layer_metadata["LayerOffsetX"] + attr_ds["general_offset_x"]
@@ -210,8 +210,8 @@ class ClipLayer:
     def composite(self, prepended_layers=[]) -> Optional[Image.Image]:
         if self.layer_id in self._raster:
             composited = self._raster[self.layer_id]["image"]
-        elif self.layer_id in ClipLayer.composite_cache:
-            composited = ClipLayer.composite_cache[self.layer_id]
+        elif self._composited is not None:
+            composited = self._composited
         elif (
             "DrawColorEnable" in self._record.keys()
             and self._record["DrawColorEnable"].loc[self._idx] == 1.0
@@ -235,7 +235,7 @@ class ClipLayer:
             else:
                 return None
 
-        ClipLayer.composite_cache[self.layer_id] = composited
+        self._composited = composited
         return arr_to_pil(composited)
 
     def _composit_layers(self, layer_list: List[ClipLayer]) -> np.ndarray:
@@ -271,20 +271,14 @@ class ClipLayer:
                     ) as f:
                         f.write(layer_metadata["ResizableImageInfo"])
 
-                ClipLayer.resizable_image_attributes[layer_id] = (
-                    process_resizable_image_attributes(
-                        layer_metadata["ResizableImageInfo"]
-                    )
+                layer._resizable_image_attrs = process_resizable_image_attributes(
+                    layer_metadata["ResizableImageInfo"]
                 )
 
                 layer_buffer = np.zeros((*self._canvas_size, 4), dtype=np.uint8)
 
-                source_coords = ClipLayer.resizable_image_attributes[layer_id][
-                    "source_coords"
-                ]
-                polygon_coords = ClipLayer.resizable_image_attributes[layer_id][
-                    "polygon_coords"
-                ]
+                source_coords = layer._resizable_image_attrs["source_coords"]
+                polygon_coords = layer._resizable_image_attrs["polygon_coords"]
                 transform = calculate_homography(source_coords, polygon_coords)
                 layer_buffer = backward_mapping(
                     transform, layer_img, layer_buffer, polygon_coords
