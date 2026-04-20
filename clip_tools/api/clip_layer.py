@@ -115,19 +115,19 @@ class ClipLayer:
     def visible(self) -> bool:
         return self._record["LayerVisibility"].loc[self._idx] != 0
 
+    @visible.setter
+    def visible(self, value: bool) -> None:
+        self._record.loc[self._idx, "LayerVisibility"] = 1 if value else 0
+
     @property
     def opacity(self) -> float:
         ## TODO: WILL LIKELY FAIL
         return float(self._record["LayerOpacity"].loc[self._idx]) / 256.0
 
     @opacity.setter
-    def opacity(self, value):
+    def opacity(self, value: float) -> None:
         ## TODO: WILL LIKELY FAIL
         self._record.loc[self._idx, "LayerOpacity"] = int(value * 256)
-
-    @visible.setter
-    def visible(self, value):
-        self._record.loc[self._idx, "LayerVisibility"] = 1 if value else 0
 
     @property
     def size(self) -> Tuple[int, int]:

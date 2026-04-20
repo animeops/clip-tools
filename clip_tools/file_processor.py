@@ -102,6 +102,7 @@ def check_comment_type(text: str) -> Optional[str]:
                 prefix + "syu"
             ):
                 return prefix
+    return None
 
 
 def check_if_any_visible_children(folder: Union[ClipLayer, Group, PSDImage]) -> bool:
@@ -187,6 +188,7 @@ def find_lo_paper(
         folder_name = process_name(folder.name)
         if folder_name in possible_names:
             return folder
+    return None
 
 
 def find_tap(
@@ -203,6 +205,7 @@ def find_tap(
         folder_name = process_name(folder.name)
         if folder_name in possible_names:
             return folder
+    return None
 
 
 def composite_and_paste(
@@ -243,6 +246,7 @@ def get_cel_number_from_layer_name(layer_name: str) -> Optional[str]:
     for i, c in enumerate(layer_name):
         if c.isdigit():
             return layer_name[i:].strip("_")
+    return None
 
 
 class FileProcessor:
