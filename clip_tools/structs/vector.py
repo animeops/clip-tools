@@ -3,18 +3,11 @@ from typing import Tuple, List
 import numpy as np
 from skimage.draw import line
 import pandas as pd
-from pydantic import BaseModel
 
 from clip_tools.constants import DEBUG
 from clip_tools.constants import VectorType
+from clip_tools.types import Point
 from clip_tools.utils import read_binary_spec
-
-
-class Point(BaseModel):
-    x: int
-    y: int
-    opacity: float
-    thickness: float
 
 
 def fix_bbox_coords(bbox: List[int]) -> List[int]:

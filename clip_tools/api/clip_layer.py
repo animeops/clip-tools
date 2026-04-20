@@ -13,6 +13,7 @@ from clip_tools.structs import (
     process_text_attributes,
     process_resizable_image_attributes,
 )
+from clip_tools.types import LayerEntry
 from clip_tools.utils import (
     calculate_homography,
     backward_mapping,
@@ -28,7 +29,7 @@ class ClipLayer:
         self,
         record: pd.DataFrame,
         idx: int,
-        raster: dict,
+        raster: Dict[int, LayerEntry],
         canvas_size: Tuple[int, int],
         layer_map: Optional[Dict[int, int]] = None,
     ):
@@ -79,7 +80,7 @@ class ClipLayer:
     @property
     def layer_type(self) -> str:
         if self.layer_id in self._raster:
-            return self._raster[self.layer_id]["type"]
+            return self._raster[self.layer_id].type
         else:
             return "raster"
 
@@ -209,7 +210,7 @@ class ClipLayer:
 
     def composite(self, prepended_layers=[]) -> Optional[Image.Image]:
         if self.layer_id in self._raster:
-            composited = self._raster[self.layer_id]["image"]
+            composited = self._raster[self.layer_id].image
         elif self._composited is not None:
             composited = self._composited
         elif (

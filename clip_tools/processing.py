@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -8,6 +8,7 @@ from PIL import Image
 
 from clip_tools.constants import DEBUG
 from clip_tools.structs import process_layer_blocks
+from clip_tools.types import ExternalIdEntry, LayerEntry
 from clip_tools.utils import arr_to_pil
 
 
@@ -16,20 +17,19 @@ logger = logging.getLogger(__name__)
 
 def build_external_id_map(
     dfs: Dict[str, pd.DataFrame],
-) -> Dict[str, Dict[str, Any]]:
+) -> Dict[str, ExternalIdEntry]:
     """Map each external chunk id to its owning table and column."""
-    external_id_map: Dict[str, Dict[str, Any]] = {}
+    external_id_map: Dict[str, ExternalIdEntry] = {}
     for _, row in dfs["ExternalTableAndColumnName"].iterrows():
         if row["TableName"] not in dfs:
             continue
         external_ids = dfs[row["TableName"]][row["ColumnName"]]
         for external_id in external_ids:
             external_id_str = external_id.decode("UTF-8")
-            external_id_map[external_id_str] = {
-                "table_name": row["TableName"],
-                "column_name": row["ColumnName"],
-                "found": False,
-            }
+            external_id_map[external_id_str] = ExternalIdEntry(
+                table_name=row["TableName"],
+                column_name=row["ColumnName"],
+            )
     return external_id_map
 
 
@@ -87,16 +87,16 @@ def process_clip_data(
     clip_data: Dict[str, Union[Dict[int, bytes], np.ndarray]],
     dfs: Dict[str, pd.DataFrame],
     layer_df: pd.DataFrame,
-    external_id_map: Dict[str, Dict[str, Any]],
-) -> Tuple[Dict[int, dict], List[dict]]:
+    external_id_map: Dict[str, ExternalIdEntry],
+) -> Tuple[Dict[int, LayerEntry], List[LayerEntry]]:
     """Classify processed chunks into raster/vector layers and an auxiliary bucket."""
-    raster_dict: Dict[int, dict] = {}
-    auxillary_list: List[dict] = []
+    raster_dict: Dict[int, LayerEntry] = {}
+    auxillary_list: List[LayerEntry] = []
     processed: set = set()
 
     for key, value in clip_data.items():
-        table_name = external_id_map[key]["table_name"]
-        column_name = external_id_map[key]["column_name"]
+        table_name = external_id_map[key].table_name
+        column_name = external_id_map[key].column_name
 
         logger.debug(f"Processing blocks: {key} in {table_name} {column_name}")
 
@@ -122,7 +122,9 @@ def process_clip_data(
 
             if layer_id not in layer_df["MainId"].values:
                 logger.debug(f"Skipping invalid layer: {layer_id}")
-                auxillary_list.append({"type": "invalid", "image": processed_layer_arr})
+                auxillary_list.append(
+                    LayerEntry(type="invalid", image=processed_layer_arr)
+                )
                 continue
 
             layer_metadata = layer_df[layer_df["MainId"] == layer_id].iloc[0]
@@ -137,11 +139,15 @@ def process_clip_data(
                 logger.warning(
                     f"WARNING: Skipping clipped layer: {layer_name} in folder: {layer_prefix}"
                 )
-                auxillary_list.append({"type": "clipped", "image": processed_layer_arr})
+                auxillary_list.append(
+                    LayerEntry(type="clipped", image=processed_layer_arr)
+                )
                 continue
 
             if layer_folder != 0:
-                auxillary_list.append({"type": "group", "image": processed_layer_arr})
+                auxillary_list.append(
+                    LayerEntry(type="group", image=processed_layer_arr)
+                )
                 continue
 
             if offscreen["MainId"] in dfs["MipmapInfo"]["Offscreen"].values:
@@ -154,11 +160,13 @@ def process_clip_data(
                         f"Skipping mipmap: {layer_name} in folder: {layer_prefix}"
                     )
                     auxillary_list.append(
-                        {"type": "mipmap", "image": processed_layer_arr}
+                        LayerEntry(type="mipmap", image=processed_layer_arr)
                     )
                     continue
             else:
-                auxillary_list.append({"type": "other", "image": processed_layer_arr})
+                auxillary_list.append(
+                    LayerEntry(type="other", image=processed_layer_arr)
+                )
                 continue
 
             if layer_id in processed:
@@ -168,7 +176,7 @@ def process_clip_data(
             logger.debug(
                 f"Processing layer: {layer_name} in folder: {layer_prefix} with ID: {layer_id}"
             )
-            raster_dict[layer_id] = {"type": "raster", "image": processed_layer_arr}
+            raster_dict[layer_id] = LayerEntry(type="raster", image=processed_layer_arr)
             del blocks
 
         elif isinstance(value, np.ndarray):
@@ -182,10 +190,10 @@ def process_clip_data(
 
             if layer_id not in layer_df["MainId"].values:
                 logger.debug(f"Skipping invalid layer: {layer_id}")
-                auxillary_list.append({"type": "invalid", "image": value})
+                auxillary_list.append(LayerEntry(type="invalid", image=value))
                 continue
 
-            raster_dict[layer_id] = {"type": "vector", "image": value}
+            raster_dict[layer_id] = LayerEntry(type="vector", image=value)
 
     return raster_dict, auxillary_list
 

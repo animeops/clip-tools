@@ -42,9 +42,9 @@ class ClipImage(ClipLayer):
         )
 
         for key, value in external_id_map.items():
-            if not value["found"]:
+            if not value.found:
                 logger.debug(
-                    f"External ID: {key} not found in {value['table_name']} {value['column_name']}"
+                    f"External ID: {key} not found in {value.table_name} {value.column_name}"
                 )
 
         logger.debug("Processed CLIP binary data")

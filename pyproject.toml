@@ -13,7 +13,6 @@ dependencies = [
     "psd_tools",
     "shortuuid",
     "opencv-python",
-    "pydantic>=2.7.4",
     "scikit-image>=0.24.0",
 ]
 readme = "README.md"

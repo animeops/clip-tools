@@ -1,4 +1,4 @@
-from typing import Dict, Any, Tuple, Union
+from typing import Dict, Tuple, Union
 import struct
 import zlib
 import numpy as np
@@ -7,6 +7,7 @@ import logging
 
 from clip_tools.utils import read_binary_spec
 from clip_tools.constants import DEBUG
+from clip_tools.types import ExternalIdEntry
 from .vector import process_vector_binary
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 def process_chunk_binary(
     clip_binary_str: bytes,
     canvas_shape: Tuple[int, int],
-    external_id_map: Dict[str, Dict[str, Any]],
+    external_id_map: Dict[str, ExternalIdEntry],
     brush_styles: pd.DataFrame,
 ) -> Tuple[Dict[str, Union[Dict[int, bytes], np.ndarray]], Dict[str, int]]:
     CSF_CHUNK = b"CSFCHUNK"
@@ -69,7 +70,7 @@ def process_chunk_binary(
                     f"External ID {external_id_str} not found in CLIP SQLite database"
                 )
             else:
-                external_id_map[external_id_str]["found"] = True
+                external_id_map[external_id_str].found = True
 
             chunk_dict[external_id_str] = {}
             data_binary_str = clip_binary_str[pos : pos + data_size]
