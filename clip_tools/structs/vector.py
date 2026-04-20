@@ -56,16 +56,11 @@ def process_vector_binary(
 
         data, pos = read_binary_spec(vector_binary_str, header_spec, pos)
 
-        try:
-            assert (
-                data == (88, 72, 88, 88)
-                or data == (88, 72, 104, 88)
-                or data == (88, 72, 120, 88)
-            )
-        except AssertionError:
-            import pdb
-
-            pdb.set_trace()
+        assert (
+            data == (88, 72, 88, 88)
+            or data == (88, 72, 104, 88)
+            or data == (88, 72, 120, 88)
+        )
 
         if data == (88, 72, 120, 88):
             vector_type = VectorType.BEZIER
@@ -269,11 +264,11 @@ def process_vector_binary(
         # Draw list of points as lines with cv2
         for i in range(len(vector_ds["points"]) - 1):
             """
-            cv2.line(arr, 
-                     (int(vector_ds["points"][i][0]), 
-                      int(vector_ds["points"][i][1])), 
-                     (int(vector_ds["points"][i + 1][0]), 
-                      int(vector_ds["points"][i + 1][1])), 
+            cv2.line(arr,
+                     (int(vector_ds["points"][i][0]),
+                      int(vector_ds["points"][i][1])),
+                     (int(vector_ds["points"][i + 1][0]),
+                      int(vector_ds["points"][i + 1][1])),
                     # vector_ds["color"], int(np.floor(vector_ds["stroke_width"])), lineType=cv2.LINE_AA)
                     vector_ds["color"], 2, lineType=cv2.LINE_AA)
             """
@@ -284,12 +279,12 @@ def process_vector_binary(
 
             """
             cv2.line(arr,
-                    (int(vector_ds["points"][i].x), 
+                    (int(vector_ds["points"][i].x),
                      int(vector_ds["points"][i].y)),
-                    (int(vector_ds["points"][i + 1].x), 
+                    (int(vector_ds["points"][i + 1].x),
                      int(vector_ds["points"][i + 1].y)),
                     line_color,
-                    # max(int(np.round(vector_ds["points"][i].thickness)), 1), 
+                    # max(int(np.round(vector_ds["points"][i].thickness)), 1),
                     2,
                     lineType=cv2.LINE_AA)
             """

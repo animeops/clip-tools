@@ -119,9 +119,6 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
         if DEBUG:
             for row in attr_arr:
                 print(row)
-            import pdb
-
-            pdb.set_trace()
 
     data, pos = read_binary_spec(attributes, uint_spec, pos)
     attr_arr.append(("num_chars_1", data[0]))
@@ -143,9 +140,6 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
         if DEBUG:
             for row in attr_arr:
                 print(row)
-            import pdb
-
-            pdb.set_trace()
 
     # data, pos = read_binary_spec(attributes, uint4_spec, pos)
     # attr_arr.append(("?", data))
@@ -220,9 +214,6 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
             if DEBUG:
                 for row in attr_arr:
                     print(row)
-                import pdb
-
-                pdb.set_trace()
     else:
         try:
             # while data[:3] != (18, 18, 1):
@@ -233,10 +224,6 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
             if DEBUG:
                 for row in attr_arr:
                     print(row)
-
-                import pdb
-
-                pdb.set_trace()
 
     data, pos = read_binary_spec(attributes, uint_spec, pos)
     attr_arr.append(("num_chars_5", data[0]))
@@ -272,9 +259,6 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
         if DEBUG:
             for row in attr_arr:
                 print(row)
-            import pdb
-
-            pdb.set_trace()
 
     data, pos = read_binary_spec(attributes, uint2_spec, pos)
     attr_arr.append(("?", data))

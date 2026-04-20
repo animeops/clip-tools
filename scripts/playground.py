@@ -13,6 +13,7 @@ import os
 
 # Setup CLI parsing
 import argparse
+
 parser = argparse.ArgumentParser(description="Process layer file.")
 parser.add_argument("path", type=str, help="Path to file")
 parser.add_argument("--find-psds", action="store_true", help="Find PSD files in folder")
