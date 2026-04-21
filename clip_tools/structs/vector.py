@@ -74,7 +74,6 @@ def process_vector_binary(
         try:
             assert data[1] in [8321, 33]
         except AssertionError:
-            # print("WARNING: Something is weird")
             pass
 
         data, pos = read_binary_spec(vector_binary_str, uint2_spec, pos)
@@ -108,7 +107,6 @@ def process_vector_binary(
         vector_ds["stroke_opacity"] = data[0]
 
         data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
-        # data, pos = read_binary_spec(vector_binary_str, byte2_spec, pos)
         vector_ds["brush_id"] = data[0]
 
         if vector_ds["brush_id"] in brush_styles["MainId"].values:
@@ -117,10 +115,8 @@ def process_vector_binary(
             ]
 
             if brush["CompositeMode"] in [27]:
-                # print(f"WARNING: Composite mode {brush['CompositeMode']} is not supported yet")
                 vector_ds["stroke_opacity"] = 0
 
-        # vector_ds.append(data)
         data, pos = read_binary_spec(vector_binary_str, double_spec, pos)
         vector_ds["stroke_width"] = data[0]
         vector_ds["brush_size"] = data[0] * 2.0
@@ -153,20 +149,18 @@ def process_vector_binary(
             vector_ds["strokes"][i]["point"] = [point_x, point_y]
 
             if vector_type == VectorType.BEZIER:
-                # TODO: Currently this doesn't really do anything
+                # Bezier control-handle bytes are consumed but not yet wired
+                # into the sampler.
                 if i == num_control_points - 2 or i == 1:
                     data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
                     point_x, point_y = data
-                    # vector_ds.append(("Bezier:", [point_x, point_y]))
 
                     data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
                     point_x, point_y = data
-                    # vector_ds.append(("Bezier:", [point_x, point_y]))
 
                 if i == num_control_points - 1:
                     data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
                     point_x, point_y = data
-                    # vector_ds.append(("Bezier:", [point_x, point_y]))
                     continue
 
             if vector_type == VectorType.CURVE and not first_point:
@@ -184,8 +178,6 @@ def process_vector_binary(
 
             data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
 
-            # Print binary
-            # print("{:0b}".format(data[0]))
             rounded_corners = not (data[0] & 1)
             data = data[0] >> 1
 
@@ -268,33 +260,11 @@ def process_vector_binary(
                 else:
                     print(f"{key}: {value}")
 
-        # Draw list of points as lines with cv2
         for i in range(len(vector_ds["points"]) - 1):
-            """
-            cv2.line(arr,
-                     (int(vector_ds["points"][i][0]),
-                      int(vector_ds["points"][i][1])),
-                     (int(vector_ds["points"][i + 1][0]),
-                      int(vector_ds["points"][i + 1][1])),
-                    # vector_ds["color"], int(np.floor(vector_ds["stroke_width"])), lineType=cv2.LINE_AA)
-                    vector_ds["color"], 2, lineType=cv2.LINE_AA)
-            """
             line_color = vector_ds["color"]
             line_color[3] = int(
                 vector_ds["stroke_opacity"] * vector_ds["points"][i].opacity * 255
             )
-
-            """
-            cv2.line(arr,
-                    (int(vector_ds["points"][i].x),
-                     int(vector_ds["points"][i].y)),
-                    (int(vector_ds["points"][i + 1].x),
-                     int(vector_ds["points"][i + 1].y)),
-                    line_color,
-                    # max(int(np.round(vector_ds["points"][i].thickness)), 1),
-                    2,
-                    lineType=cv2.LINE_AA)
-            """
 
             rr, cc = line(
                 int(vector_ds["points"][i].y),
@@ -305,13 +275,5 @@ def process_vector_binary(
             h, w = arr.shape[:2]
             in_bounds = (rr >= 0) & (rr < h) & (cc >= 0) & (cc < w)
             arr[rr[in_bounds], cc[in_bounds]] = line_color
-
-            # Replace with scipy calls
-
-    # Undo pre-multiplied alphas
-    # alphas = arr[..., 3] / 255.0
-    # arr[arr[..., 3] > 0] = vector_ds["color"]
-    # arr[..., :3] = (((arr.astype(np.float32) / 255.0) * alphas[..., np.newaxis]) * 255).astype(np.uint8)[..., :3]
-    # arr[..., 3] = (alphas * 255).astype(np.uint8)
 
     return arr

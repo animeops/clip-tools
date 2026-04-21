@@ -168,13 +168,9 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
         data, pos = read_binary_spec(attributes, uint2_spec, pos)
         try:
             assert data == (1, 0)
-            # attr_arr.append(("chunk_boundary", data))
         except Exception:
             attr_arr.append(("chunk_boundary", data))
             if DEBUG:
-                # for row in attr_arr:
-                #     print(row)
-                # import pdb; pdb.set_trace()
                 pass
 
         data, pos = read_binary_spec(attributes, uint_spec, pos)

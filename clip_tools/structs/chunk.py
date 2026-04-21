@@ -18,7 +18,7 @@ def process_chunk_binary(
     canvas_shape: Tuple[int, int],
     external_id_map: Dict[str, ExternalIdEntry],
     brush_styles: pd.DataFrame,
-) -> Tuple[Dict[str, Union[Dict[int, bytes], np.ndarray]], Dict[str, int]]:
+) -> Tuple[Dict[str, Union[Dict[int, bytes], bytes]], Dict[str, int]]:
     CSF_CHUNK = b"CSFCHUNK"
     CHUNK_HEADER = b"CHNKHead"
     CHUNK_EXTERNAL = b"CHNKExta"
@@ -52,7 +52,6 @@ def process_chunk_binary(
     while pos < filesize:
         data, pos = read_binary_spec(clip_binary_str, chunk_header_spec, pos)
         chunk_type, chunk_length = data
-        # print(chunk_type)
 
         if chunk_type == CHUNK_HEADER:
             # Skip the header for now
@@ -90,9 +89,10 @@ def process_chunk_binary(
 
                 if data == (88, 72):
                     chunk_pos -= 8
-                    chunk_dict[external_id_str] = process_vector_binary(
-                        data_binary_str, data_size, canvas_shape, brush_styles
-                    )
+                    # Store raw vector bytes; rasterization is deferred so
+                    # the later pass can resolve brush patterns (which live in
+                    # other clip_data entries) before drawing.
+                    chunk_dict[external_id_str] = bytes(data_binary_str[:data_size])
                     chunk_pos = data_size
                     continue
 
@@ -100,21 +100,16 @@ def process_chunk_binary(
                     data[1]
                     == uint_spec.unpack(BLOCK_DATA_BEGIN_CHUNK[: uint_spec.size])[0]
                 ):
-                    # print("Case A")
                     str_length = data[0]
                     chunk_pos -= uint_spec.size
                 else:
-                    # print("Case B")
                     str_length = data[1]
                     data_length = data[0]
 
-                # print(data)
                 bd_id = data_binary_str[chunk_pos : chunk_pos + (str_length * 2)]
-                # print("bd_id: ", bd_id.hex())
                 chunk_pos += str_length * 2
 
                 if bd_id == BLOCK_DATA_BEGIN_CHUNK:
-                    # print("BLOCK_DATA_BEGIN_CHUNK")
                     data, chunk_pos = read_binary_spec(
                         data_binary_str, block_header_spec, chunk_pos
                     )
@@ -136,37 +131,27 @@ def process_chunk_binary(
 
                 elif bd_id == BLOCK_DATA_END_CHUNK:
                     pass
-                    # print("BLOCK_DATA_END_CHUNK")
                 elif bd_id == BLOCK_STATUS:
-                    # print("BLOCK_STATUS")
                     data, chunk_pos = read_binary_spec(
                         data_binary_str, block_test_spec, chunk_pos
                     )
                     str_length = data[1]
                     chunk_pos += str_length * 4
-                    # chunk_pos += 28
-                    # chunk_pos += 12
-                    # import pdb; pdb.set_trace()
                 elif bd_id == BLOCK_CHECK_SUM:
-                    # print("BLOCK_CHECK_SUM")
                     data, chunk_pos = read_binary_spec(
                         data_binary_str, block_test_spec, chunk_pos
                     )
                     str_length = data[1] + 1
                     chunk_pos += str_length * 4
                 else:
-                    # import pdb; pdb.set_trace()
-                    # print("Unknown block... skipping")
                     num_skipped_dict[external_id_str] += 1
                     chunk_pos = data_size
-                    pass
 
             pos += data_size
 
         elif chunk_type == CHUNK_SQLITE:
             break
         else:
-            # print(chunk_type)
             raise Exception("Invalid chunk type")
 
     chunk_dict = dict(sorted(chunk_dict.items()))

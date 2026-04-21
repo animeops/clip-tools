@@ -1,15 +1,29 @@
 import logging
 import os
-from typing import Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from PIL import Image
 
 from clip_tools.constants import DEBUG
+from clip_tools.rendering import (  # re-exported for backwards compat
+    extract_brush_pattern_images,
+    rasterize_vectors,
+)
 from clip_tools.structs import process_layer_blocks
 from clip_tools.types import ExternalIdEntry, LayerEntry
 from clip_tools.utils import arr_to_pil
+
+
+__all__ = [
+    "augment_layer_df",
+    "build_external_id_map",
+    "dump_dfs_csv",
+    "extract_brush_pattern_images",
+    "process_clip_data",
+    "rasterize_vectors",
+]
 
 
 logger = logging.getLogger(__name__)

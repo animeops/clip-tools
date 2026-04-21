@@ -9,6 +9,7 @@ from clip_tools.processing import (
     build_external_id_map,
     dump_dfs_csv,
     process_clip_data,
+    rasterize_vectors,
 )
 from clip_tools.structs import process_chunk_binary
 
@@ -46,6 +47,10 @@ class ClipImage(ClipLayer):
                 logger.debug(
                     f"External ID: {key} not found in {value.table_name} {value.column_name}"
                 )
+
+        # Vectors are now stored as raw bytes in clip_data; rasterize them now
+        # that brush patterns (also in clip_data) are available.
+        rasterize_vectors(clip_data, dfs, canvas_size)
 
         logger.debug("Processed CLIP binary data")
 
