@@ -87,27 +87,22 @@ def process_vector_binary(
 
         data, pos = read_binary_spec(vector_binary_str, color3_spec, pos)
         color_r, color_g, color_b = data
-
-        # No idea why these exist
-        # color_ra = (color_r & (255 << 0)) >> 0
-        # color_ga = (color_g & (255 << 0)) >> 0
-        # color_ba = (color_b & (255 << 0)) >> 0
-
         color_r = (color_r & (255 << 8)) >> 8
         color_g = (color_g & (255 << 8)) >> 8
         color_b = (color_b & (255 << 8)) >> 8
         vector_ds["color"] = [color_r, color_g, color_b, 255]
 
+        # 3 x u32 following the primary color. For custom/colored brushes, these
+        # byte-for-byte duplicate the three color uint32s (a redundant color
+        # copy). For default black-ink strokes they become a hardcoded
+        # (0xFFFFFFFF, 0xAFAFAFAF, 0x00000000) — likely a pressure-falloff /
+        # tint curve (255, 175, 0). Kept as raw bytes for now.
         data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-        vector_ds["mystery_1"] = data
-        # vector_ds.append(data)
+        vector_ds["color_variant_r"] = data
         data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-        vector_ds["mystery_2"] = data
-        # vector_ds.append(data)
+        vector_ds["color_variant_g"] = data
         data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-        vector_ds["mystery_3"] = data
-        # vector_ds.append(data)
-        # no idea wtf this is
+        vector_ds["color_variant_b"] = data
 
         data, pos = read_binary_spec(vector_binary_str, double_spec, pos)
         vector_ds["stroke_opacity"] = data[0]
@@ -146,8 +141,12 @@ def process_vector_binary(
             if first_point:
                 vector_id = data
             else:
+                # Monotonically increasing u32 across control points.
+                # Inferred meaning: cumulative arc-length or sample-time along
+                # the stroke (e.g. 0, 4, 18, 47, 100, 131, ..., 475 across 22
+                # points on a single stroke).
                 data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
-                vector_ds["strokes"][i]["mystery_0"] = data
+                vector_ds["strokes"][i]["cumulative_param"] = data
 
             data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
             point_x, point_y = data
@@ -192,15 +191,24 @@ def process_vector_binary(
 
             vector_ds["strokes"][i]["rounded_corners"] = rounded_corners
             vector_ds["strokes"][i]["num_controls_enabled"] = bin(data).count("1")
+            # 2 floats in [0, 1]. First float matches a classic pen-pressure
+            # curve (0.1 → 1.0 → 0.0 over a stroke's length). Second float
+            # drifts slowly; likely tilt or velocity. Names inferred, not
+            # confirmed from file spec.
             data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["mystery_1"] = data
+            vector_ds["strokes"][i]["pressure_and_tilt"] = data
 
-            # data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
-            data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-            vector_ds["strokes"][i]["mystery_2"] = data
+            # float32 in [0, 1]. Small positives that roughly track pressure:
+            # ~0.19 during steady drawing, drops to ~0.02 at stroke ends.
+            # Best guess: brush step / spacing per sample. (Was previously
+            # mis-typed as 4 raw bytes.)
+            data, pos = read_binary_spec(vector_binary_str, float_spec, pos)
+            vector_ds["strokes"][i]["brush_step"] = data[0]
 
+            # Always (0.0, 1.0) across every observed stroke in every file —
+            # looks like (pressure_min, pressure_max) normalization bounds.
             data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["mystery_3"] = data
+            vector_ds["strokes"][i]["pressure_range"] = data
             # vector_ds.append(data)
             data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
             vector_ds["strokes"][i]["stroke_width"] = data[0]
@@ -224,12 +232,18 @@ def process_vector_binary(
                     )
                 )
 
+            # Always (0.0, 0.0) in every observed sample — default tilt vector.
             data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["mystery_4"] = data
+            vector_ds["strokes"][i]["tilt_xy"] = data
+            # Always 0.0 — default stroke rotation.
             data, pos = read_binary_spec(vector_binary_str, float_spec, pos)
-            vector_ds["strokes"][i]["mystery_5"] = data
-            data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-            vector_ds["strokes"][i]["mystery_6"] = data
+            vector_ds["strokes"][i]["rotation"] = data
+            # float32 in [0, 1], uniformly distributed; always 0.0 on first
+            # point. Best guess: per-sample texture random seed / UV phase
+            # offset used to de-tile brush stamps along the stroke. (Was
+            # previously mis-typed as 4 raw bytes.)
+            data, pos = read_binary_spec(vector_binary_str, float_spec, pos)
+            vector_ds["strokes"][i]["texture_seed"] = data[0]
 
             if first_point:
                 first_point = False

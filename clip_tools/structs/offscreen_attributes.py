@@ -37,6 +37,24 @@ def process_offscreen_attributes(attribute: bytes) -> Dict[str, Any]:
         section_sizes[1] = 102                      # length of Parameter section (incl. B1)
         section_sizes[2] = 42 or 58                 # length of InitColor section (42 base, +16 if has_color)
         section_sizes[3] = 34 + 4 * nblocks         # length of BlockSize section
+
+    Unresolved / inferred (not yet cracked with sample diversity):
+        - color_mode=33, alpha_flag=1, bit_depth_enum=5 — values have been
+          constant across every sample; the *labels* are best guesses based
+          on position and would need samples with different color modes
+          (grayscale, 16-bit, etc.) to confirm semantics.
+        - block_bytes, block_geom flag=1, block_stride=256 — constant everywhere;
+          labels inferred from arithmetic (65536 = 256*256, 1024 = 32*32).
+        - initcolor_magic=20 — constant; could be a section type marker OR a
+          length field that happens to equal 20 for the common UNK7 layout.
+        - init_color_extra — the 16-byte trailer appears only when has_color==1,
+          and has been all-zeros in every sample. Purpose unconfirmed. A layer
+          with a non-default (non-white) init color would likely reveal semantics.
+
+    Not yet parsed elsewhere in the codebase:
+        - `text_attributes.py` still has ~30 unnamed uint reads marked "?".
+        - `vector.py` has several `mystery_N` stroke fields.
+        Both need richer sample files (with text / vector content) to decode.
     """
     PARAMETER_HEADER = "Parameter".encode("utf-16be")
     INITCOLOR_HEADER = "InitColor".encode("utf-16be")
@@ -72,25 +90,26 @@ def process_offscreen_attributes(attribute: bytes) -> Dict[str, Any]:
     attr_ds["rows"] = data[1]
 
     data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (color_mode=33, alpha_flag=1, num_channels, bit_depth_enum=5)
+    # Inferred labels — (color_mode=33, alpha_flag=1, num_channels, bit_depth_enum=5).
+    # Only num_channels has been verified; others constant across every sample.
     attr_ds["color_mode"] = data[0]
     attr_ds["alpha_flag"] = data[1]
     attr_ds["num_channels"] = data[2]
     attr_ds["bit_depth_enum"] = data[3]
 
     data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (block_bytes=65536, num_channels=4, subblocks_per_block=1024, flag=1)
+    # block_bytes = 256*256; subblocks_per_block = 32*32. Other two constant.
     attr_ds["block_bytes"] = data[0]
     attr_ds["subblocks_per_block"] = data[2]
 
     data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (block_width, block_bytes, block_height, block_stride)
+    # (block_width, block_bytes duplicate, block_height, block_stride — inferred)
     attr_ds["block_width"] = data[0]
     attr_ds["block_height"] = data[2]
     attr_ds["block_stride"] = data[3]
 
     data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (subblock_width=8, subblock_height=8, 0, 0)
+    # Inferred subblock dims (8x8). Tail two u32 always zero — reserved/padding.
     attr_ds["subblock_width"] = data[0]
     attr_ds["subblock_height"] = data[1]
 
@@ -104,18 +123,21 @@ def process_offscreen_attributes(attribute: bytes) -> Dict[str, Any]:
         raise Exception("Invalid attribute: missing InitColor header")
 
     data, pos = read_binary_spec(attribute, uint_spec, pos)
-    attr_ds["initcolor_magic"] = data[0]  # always 20 in observed samples
+    # Always 20 across every observed sample. Section-type marker, OR length
+    # of the following UNK7-only body (also 20 bytes in the no-color case).
+    # Not yet disambiguated.
+    attr_ds["initcolor_magic"] = data[0]
 
     data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (has_color, packed_rgba, nchan, nchan)
+    # (has_color, packed_rgba, nchan, nchan) — verified: paper layer = white
     attr_ds["has_init_color"] = bool(data[0])
     attr_ds["init_color"] = data[1]  # packed RGBA u32, 0xFFFFFFFF = opaque white
 
     if attr_ds["has_init_color"]:
         data, pos = read_binary_spec(attribute, uint4_spec, pos)
-        attr_ds["init_color_extra"] = (
-            data  # purpose unclear; zeros in all observed samples
-        )
+        # 16-byte trailer — zeros in every sample. Likely appears only for
+        # non-white init colors; semantics not yet cracked.
+        attr_ds["init_color_extra"] = data
 
     # --- BlockSize section ---
     data, pos = read_binary_spec(attribute, uint_spec, pos)
