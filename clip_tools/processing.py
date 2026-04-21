@@ -23,6 +23,11 @@ def build_external_id_map(
     for _, row in dfs["ExternalTableAndColumnName"].iterrows():
         if row["TableName"] not in dfs:
             continue
+        if row["ColumnName"] not in dfs[row["TableName"]].columns:
+            logger.debug(
+                f"Skipping missing column {row['TableName']}.{row['ColumnName']}"
+            )
+            continue
         external_ids = dfs[row["TableName"]][row["ColumnName"]]
         for external_id in external_ids:
             external_id_str = external_id.decode("UTF-8")
@@ -145,6 +150,12 @@ def process_clip_data(
                 continue
 
             if layer_folder != 0:
+                # Groups cache their composited raster; keep it in raster_dict as
+                # a fallback for when leaf children have no stored pixel data
+                # (ClipStudio sometimes flattens strokes into the group's cache).
+                raster_dict[layer_id] = LayerEntry(
+                    type="group", image=processed_layer_arr
+                )
                 auxillary_list.append(
                     LayerEntry(type="group", image=processed_layer_arr)
                 )

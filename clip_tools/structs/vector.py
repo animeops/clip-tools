@@ -288,7 +288,9 @@ def process_vector_binary(
                 int(vector_ds["points"][i + 1].y),
                 int(vector_ds["points"][i + 1].x),
             )
-            arr[rr, cc] = line_color
+            h, w = arr.shape[:2]
+            in_bounds = (rr >= 0) & (rr < h) & (cc >= 0) & (cc < w)
+            arr[rr[in_bounds], cc[in_bounds]] = line_color
 
             # Replace with scipy calls
 

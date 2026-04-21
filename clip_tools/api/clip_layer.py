@@ -39,7 +39,7 @@ class ClipLayer:
             idx (int): Index of the layer in the layer dataframe.
             raster (dict): Map from layer_id to the raster image.
             canvas_size (Tuple[int, int]): Size of the canvas.
-            layer_map (Optional[dict]): Map from layer_id to index in the layer dataframe.
+            layer_map (Optional[Dict[int, int]]): Map from layer_id to index in the layer dataframe.
         """
         self._record = record
         self._idx = idx
@@ -209,8 +209,10 @@ class ClipLayer:
         return len(self._children)
 
     def composite(self, prepended_layers=[]) -> Optional[Image.Image]:
-        if self.layer_id in self._raster:
-            composited = self._raster[self.layer_id].image
+        entry = self._raster.get(self.layer_id)
+
+        if entry is not None and entry.type in ("raster", "vector"):
+            composited = entry.image
         elif self._composited is not None:
             composited = self._composited
         elif (
@@ -233,6 +235,18 @@ class ClipLayer:
             if len(self.children) > 0:
                 layers_to_composit = prepended_layers + self.children
                 composited = self._composit_layers(layers_to_composit)
+                # ClipStudio sometimes flattens group strokes into the group's
+                # own cached raster and leaves child leaves empty. If child
+                # composition produced nothing, fall back to the cached group.
+                if (
+                    entry is not None
+                    and entry.type == "group"
+                    and composited.shape[-1] >= 4
+                    and not composited[..., 3].any()
+                ):
+                    composited = entry.image
+            elif entry is not None and entry.type == "group":
+                composited = entry.image
             else:
                 return None
 
