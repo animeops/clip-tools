@@ -8,7 +8,6 @@ import logging
 from clip_tools.utils import read_binary_spec
 from clip_tools.constants import DEBUG
 from clip_tools.types import ExternalIdEntry
-from .vector import process_vector_binary
 
 logger = logging.getLogger(__name__)
 

@@ -1,12 +1,12 @@
 import struct
-from typing import Tuple, List
-import numpy as np
-from skimage.draw import line
-import pandas as pd
+from typing import List, Tuple
 
-from clip_tools.constants import DEBUG
-from clip_tools.constants import VectorType
-from clip_tools.types import Point
+import numpy as np
+import pandas as pd
+from skimage.draw import line
+
+from clip_tools.constants import DEBUG, VectorType
+from clip_tools.types import VectorPoint, VectorStroke
 from clip_tools.utils import read_binary_spec
 
 
@@ -24,12 +24,12 @@ def fix_bbox_coords(bbox: List[int]) -> List[int]:
     return bbox_fixed
 
 
-def process_vector_binary(
-    vector_binary_str: bytes,
-    binary_size: int,
-    canvas_shape: Tuple[int, int],
-    brush_styles: pd.DataFrame,
-) -> np.ndarray:
+def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
+    """Parse a vector blob into a list of stroke records.
+
+    Pure: bytes in, structured strokes out. No DataFrame access, no
+    rasterization. Renderers consume the returned list.
+    """
     header_spec = struct.Struct(">IIII")
     uint_spec = struct.Struct(">I")
     uint2_spec = struct.Struct(">II")
@@ -40,240 +40,172 @@ def process_vector_binary(
     double2_spec = struct.Struct(">dd")
     byte4_spec = struct.Struct(">BBBB")
 
-    arr = np.zeros((canvas_shape[0], canvas_shape[1], 4), dtype=np.uint8)
-
+    strokes: List[VectorStroke] = []
     pos = 0
+    n = len(vb)
 
-    while pos < binary_size - 8:
-        vector_ds = {}
-
-        data, pos = read_binary_spec(vector_binary_str, header_spec, pos)
-
-        assert (
-            data == (88, 72, 88, 88)
-            or data == (88, 72, 104, 88)
-            or data == (88, 72, 120, 88)
-        )
+    while pos < n - 8:
+        data, pos = read_binary_spec(vb, header_spec, pos)
 
         if data == (88, 72, 120, 88):
-            vector_type = VectorType.BEZIER
-
+            vtype = VectorType.BEZIER
         elif data == (88, 72, 104, 88):
-            vector_type = VectorType.CURVE
-
+            vtype = VectorType.CURVE
         elif data == (88, 72, 88, 88):
-            vector_type = VectorType.STANDARD
+            vtype = VectorType.STANDARD
+        else:
+            break
 
-        vector_ds["vector_type"] = vector_type
-
-        data, pos = read_binary_spec(vector_binary_str, uint2_spec, pos)
+        data, pos = read_binary_spec(vb, uint2_spec, pos)
         num_control_points = data[0]
-        vector_ds["num_control_points"] = num_control_points
-        vector_ds["header_id"] = data[1]
 
-        try:
-            assert data[1] in [8321, 33]
-        except AssertionError:
-            pass
+        # bbox (top_left, bottom_right) — read but unused for rendering.
+        pos += 16
 
-        data, pos = read_binary_spec(vector_binary_str, uint2_spec, pos)
-        top_left = data
-        data, pos = read_binary_spec(vector_binary_str, uint2_spec, pos)
-        bottom_right = data
-        global_bbox = [top_left[0], top_left[1], bottom_right[0], bottom_right[1]]
-        global_bbox = fix_bbox_coords(global_bbox)
-        vector_ds["global_bbox"] = global_bbox
+        data, pos = read_binary_spec(vb, color3_spec, pos)
+        cr, cg, cb = data
+        color = (
+            int((cr & 0xFF00) >> 8),
+            int((cg & 0xFF00) >> 8),
+            int((cb & 0xFF00) >> 8),
+        )
 
-        data, pos = read_binary_spec(vector_binary_str, color3_spec, pos)
-        color_r, color_g, color_b = data
-        color_r = (color_r & (255 << 8)) >> 8
-        color_g = (color_g & (255 << 8)) >> 8
-        color_b = (color_b & (255 << 8)) >> 8
-        vector_ds["color"] = [color_r, color_g, color_b, 255]
+        # 3 × u32 color variants — see clip_tools/unknowns.md.
+        pos += 12
 
-        # 3 x u32 following the primary color. For custom/colored brushes, these
-        # byte-for-byte duplicate the three color uint32s (a redundant color
-        # copy). For default black-ink strokes they become a hardcoded
-        # (0xFFFFFFFF, 0xAFAFAFAF, 0x00000000) — likely a pressure-falloff /
-        # tint curve (255, 175, 0). Kept as raw bytes for now.
-        data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-        vector_ds["color_variant_r"] = data
-        data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-        vector_ds["color_variant_g"] = data
-        data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-        vector_ds["color_variant_b"] = data
+        data, pos = read_binary_spec(vb, double_spec, pos)
+        stroke_opacity = data[0]
 
-        data, pos = read_binary_spec(vector_binary_str, double_spec, pos)
-        vector_ds["stroke_opacity"] = data[0]
+        data, pos = read_binary_spec(vb, uint_spec, pos)
+        brush_id = data[0]
 
-        data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
-        vector_ds["brush_id"] = data[0]
+        data, pos = read_binary_spec(vb, double_spec, pos)
+        brush_size = data[0] * 2.0
 
-        if vector_ds["brush_id"] in brush_styles["MainId"].values:
-            brush = brush_styles[brush_styles["MainId"] == vector_ds["brush_id"]].iloc[
-                0
-            ]
+        ctrl = (
+            num_control_points + 1 if vtype == VectorType.BEZIER else num_control_points
+        )
+        first = True
+        points: List[VectorPoint] = []
 
-            if brush["CompositeMode"] in [27]:
-                vector_ds["stroke_opacity"] = 0
+        for i in range(ctrl):
+            # Per-point stroke_id (4 bytes) and cumulative_param (uint32 except first).
+            pos += 4
+            if not first:
+                pos += 4
 
-        data, pos = read_binary_spec(vector_binary_str, double_spec, pos)
-        vector_ds["stroke_width"] = data[0]
-        vector_ds["brush_size"] = data[0] * 2.0
+            data, pos = read_binary_spec(vb, double2_spec, pos)
+            px, py = data
 
-        first_point = True
-        vector_id = None
-        if vector_type == VectorType.BEZIER:
-            num_control_points += 1
-
-        vector_ds["strokes"] = [{} for _ in range(num_control_points)]
-        vector_ds["points"] = []
-
-        for i in range(num_control_points):
-            # Start the loop
-            data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-            vector_ds["strokes"][i]["stroke_id"] = data
-
-            if first_point:
-                vector_id = data
-            else:
-                # Monotonically increasing u32 across control points.
-                # Inferred meaning: cumulative arc-length or sample-time along
-                # the stroke (e.g. 0, 4, 18, 47, 100, 131, ..., 475 across 22
-                # points on a single stroke).
-                data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
-                vector_ds["strokes"][i]["cumulative_param"] = data
-
-            data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
-            point_x, point_y = data
-            vector_ds["strokes"][i]["point"] = [point_x, point_y]
-
-            if vector_type == VectorType.BEZIER:
-                # Bezier control-handle bytes are consumed but not yet wired
-                # into the sampler.
-                if i == num_control_points - 2 or i == 1:
-                    data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
-                    point_x, point_y = data
-
-                    data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
-                    point_x, point_y = data
-
-                if i == num_control_points - 1:
-                    data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
-                    point_x, point_y = data
+            if vtype == VectorType.BEZIER:
+                # Bezier control handles — captured but not yet wired into
+                # the sampler. See clip_tools/unknowns.md.
+                if i == 1 or i == ctrl - 2:
+                    pos += 32
+                if i == ctrl - 1:
+                    pos += 16
+                    if first:
+                        first = False
                     continue
 
-            if vector_type == VectorType.CURVE and not first_point:
-                data, pos = read_binary_spec(vector_binary_str, double2_spec, pos)
-                point_x, point_y = data
-                vector_ds["strokes"][i]["curve"] = [point_x, point_y]
+            curve = None
+            if vtype == VectorType.CURVE and not first:
+                data, pos = read_binary_spec(vb, double2_spec, pos)
+                curve = (data[0], data[1])
 
-            data, pos = read_binary_spec(vector_binary_str, uint2_spec, pos)
-            top_left = data
-            data, pos = read_binary_spec(vector_binary_str, uint2_spec, pos)
-            bottom_right = data
-            stroke_bbox = [top_left[0], top_left[1], bottom_right[0], bottom_right[1]]
-            stroke_bbox = fix_bbox_coords(stroke_bbox)
-            vector_ds["strokes"][i]["stroke_bbox"] = stroke_bbox
+            # Per-point bbox + flags.
+            pos += 16
+            pos += 4
 
-            data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
+            data, pos = read_binary_spec(vb, float2_spec, pos)
+            pressure = data[0]
 
-            rounded_corners = not (data[0] & 1)
-            data = data[0] >> 1
+            data, pos = read_binary_spec(vb, float_spec, pos)
+            size_modulation = data[0]
 
-            vector_ds["strokes"][i]["rounded_corners"] = rounded_corners
-            vector_ds["strokes"][i]["num_controls_enabled"] = bin(data).count("1")
-            # 2 floats in [0, 1]. First float matches a classic pen-pressure
-            # curve (0.1 → 1.0 → 0.0 over a stroke's length). Second float
-            # drifts slowly; likely tilt or velocity. Names inferred, not
-            # confirmed from file spec.
-            data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["pressure_and_tilt"] = data
+            # pressure_range — always (0.0, 1.0); see clip_tools/unknowns.md.
+            pos += 8
 
-            # float32 in [0, 1]. Small positives that roughly track pressure:
-            # ~0.19 during steady drawing, drops to ~0.02 at stroke ends.
-            # Best guess: brush step / spacing per sample. (Was previously
-            # mis-typed as 4 raw bytes.)
-            data, pos = read_binary_spec(vector_binary_str, float_spec, pos)
-            vector_ds["strokes"][i]["brush_step"] = data[0]
+            data, pos = read_binary_spec(vb, float2_spec, pos)
+            width_factor, opacity_factor = data
 
-            # Always (0.0, 1.0) across every observed stroke in every file —
-            # looks like (pressure_min, pressure_max) normalization bounds.
-            data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["pressure_range"] = data
-            # vector_ds.append(data)
-            data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["stroke_width"] = data[0]
-            vector_ds["strokes"][i]["stroke_opacity"] = data[1]
+            # tilt_xy + rotation + texture_seed — see clip_tools/unknowns.md.
+            pos += 8 + 4 + 4
 
-            vector_ds["points"].append(
-                Point(
-                    x=vector_ds["strokes"][i]["point"][0],
-                    y=vector_ds["strokes"][i]["point"][1],
-                    opacity=vector_ds["strokes"][i]["stroke_opacity"],
-                    thickness=vector_ds["strokes"][i]["stroke_width"],
+            points.append(
+                VectorPoint(
+                    x=px,
+                    y=py,
+                    pressure=pressure,
+                    width_factor=width_factor,
+                    opacity_factor=opacity_factor,
+                    size_modulation=size_modulation,
+                    curve=curve,
                 )
             )
-            if "curve" in vector_ds["strokes"][i]:
-                vector_ds["points"].append(
-                    Point(
-                        x=vector_ds["strokes"][i]["curve"][0],
-                        y=vector_ds["strokes"][i]["curve"][1],
-                        opacity=vector_ds["strokes"][i]["stroke_opacity"],
-                        thickness=vector_ds["strokes"][i]["stroke_width"],
-                    )
-                )
 
-            # Always (0.0, 0.0) in every observed sample — default tilt vector.
-            data, pos = read_binary_spec(vector_binary_str, float2_spec, pos)
-            vector_ds["strokes"][i]["tilt_xy"] = data
-            # Always 0.0 — default stroke rotation.
-            data, pos = read_binary_spec(vector_binary_str, float_spec, pos)
-            vector_ds["strokes"][i]["rotation"] = data
-            # float32 in [0, 1], uniformly distributed; always 0.0 on first
-            # point. Best guess: per-sample texture random seed / UV phase
-            # offset used to de-tile brush stamps along the stroke. (Was
-            # previously mis-typed as 4 raw bytes.)
-            data, pos = read_binary_spec(vector_binary_str, float_spec, pos)
-            vector_ds["strokes"][i]["texture_seed"] = data[0]
+            if first:
+                first = False
 
-            if first_point:
-                first_point = False
+        # Stroke trailers — see clip_tools/unknowns.md.
+        if vtype == VectorType.STANDARD or vtype == VectorType.CURVE:
+            pos += 8  # tail_id (4) + tail_param (4)
+        if vtype == VectorType.CURVE:
+            pos += 16  # curve_trailer
 
-        if vector_type == VectorType.STANDARD or vector_type == VectorType.CURVE:
-            data, pos = read_binary_spec(vector_binary_str, byte4_spec, pos)
-            vector_ds["mystery_4"] = data
-            data, pos = read_binary_spec(vector_binary_str, uint_spec, pos)
-            vector_ds["mystery_5"] = data
-
-        if vector_type == VectorType.CURVE:
-            data, pos = read_binary_spec(vector_binary_str, header_spec, pos)
-            vector_ds["mystery_6"] = data
+        strokes.append(
+            VectorStroke(
+                vtype=vtype,
+                color=color,
+                stroke_opacity=stroke_opacity,
+                brush_size=brush_size,
+                brush_id=brush_id,
+                points=points,
+            )
+        )
 
         if DEBUG:
-            for key, value in vector_ds.items():
-                if key == "strokes":
-                    for stroke in value:
-                        for k, v in stroke.items():
-                            print(f"  {k}: {v}")
-                        print("")
-                else:
-                    print(f"{key}: {value}")
-
-        for i in range(len(vector_ds["points"]) - 1):
-            line_color = vector_ds["color"]
-            line_color[3] = int(
-                vector_ds["stroke_opacity"] * vector_ds["points"][i].opacity * 255
+            print(
+                f"stroke: vtype={vtype} color={color} opacity={stroke_opacity} "
+                f"brush_id={brush_id} brush_size={brush_size} npoints={len(points)}"
             )
 
-            rr, cc = line(
-                int(vector_ds["points"][i].y),
-                int(vector_ds["points"][i].x),
-                int(vector_ds["points"][i + 1].y),
-                int(vector_ds["points"][i + 1].x),
-            )
-            h, w = arr.shape[:2]
+    return strokes
+
+
+def rasterize_polylines(
+    strokes: List[VectorStroke],
+    canvas_shape: Tuple[int, int],
+    brush_styles: pd.DataFrame,
+) -> np.ndarray:
+    """Legacy fallback rasterizer: 1-pixel Bresenham per segment.
+
+    Used when the line-stamp renderer can't handle a stroke (spray brushes,
+    unresolvable patterns).
+    """
+    arr = np.zeros((canvas_shape[0], canvas_shape[1], 4), dtype=np.uint8)
+    h, w = arr.shape[:2]
+
+    for st in strokes:
+        stroke_op = st.stroke_opacity
+        if brush_styles is not None and len(brush_styles) > 0:
+            match = brush_styles[brush_styles["MainId"] == st.brush_id]
+            if len(match) and match.iloc[0]["CompositeMode"] in [27]:
+                stroke_op = 0
+
+        flat: List[Tuple[float, float, float]] = []
+        for p in st.points:
+            flat.append((p.x, p.y, p.opacity_factor))
+            if p.curve is not None:
+                flat.append((p.curve[0], p.curve[1], p.opacity_factor))
+
+        r, g, b = st.color
+        for i in range(len(flat) - 1):
+            x0, y0, op0 = flat[i]
+            x1, y1, _ = flat[i + 1]
+            alpha = int(stroke_op * op0 * 255)
+            rr, cc = line(int(y0), int(x0), int(y1), int(x1))
             in_bounds = (rr >= 0) & (rr < h) & (cc >= 0) & (cc < w)
-            arr[rr[in_bounds], cc[in_bounds]] = line_color
+            arr[rr[in_bounds], cc[in_bounds]] = (r, g, b, alpha)
 
     return arr

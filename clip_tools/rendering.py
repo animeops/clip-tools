@@ -13,7 +13,6 @@ after ``process_chunk_binary`` and before ``process_clip_data``.
 from __future__ import annotations
 
 import logging
-import struct
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -21,7 +20,8 @@ import pandas as pd
 
 from clip_tools.constants import VectorType
 from clip_tools.structs import process_layer_blocks
-from clip_tools.structs.vector import process_vector_binary
+from clip_tools.structs.brush_attributes import parse_brush_pattern_image_index
+from clip_tools.structs.vector import parse_vector_binary, rasterize_polylines
 from clip_tools.types import BrushStyle, VectorPoint, VectorSample, VectorStroke
 
 
@@ -96,12 +96,7 @@ def _get_pattern_style_images(
     ]
     if len(rows) == 0:
         return []
-    row = rows.iloc[0]
-    idx_bytes = row["ImageIndex"]
-    n = len(idx_bytes) // 4
-    if n == 0:
-        return []
-    return list(struct.unpack(f">{n}I", idx_bytes))
+    return parse_brush_pattern_image_index(rows.iloc[0]["ImageIndex"])
 
 
 # -----------------------------------------------------------------------------
@@ -438,115 +433,6 @@ def _sample_curve_points(
     return out
 
 
-def _parse_vector_for_render(vb: bytes) -> List[VectorStroke]:
-    """Parse a raw vector binary into a list of strokes."""
-    header_spec = struct.Struct(">IIII")
-    uint_spec = struct.Struct(">I")
-    uint2_spec = struct.Struct(">II")
-    color3_spec = struct.Struct(">III")
-    double_spec = struct.Struct(">d")
-    double2_spec = struct.Struct(">dd")
-    float_spec = struct.Struct(">f")
-    float2_spec = struct.Struct(">ff")
-
-    pos = 0
-    out: List[VectorStroke] = []
-    while pos < len(vb) - 8:
-        try:
-            hdr = header_spec.unpack_from(vb, pos)
-            pos += 16
-            if hdr == (88, 72, 120, 88):
-                vtype = VectorType.BEZIER
-            elif hdr == (88, 72, 104, 88):
-                vtype = VectorType.CURVE
-            elif hdr == (88, 72, 88, 88):
-                vtype = VectorType.STANDARD
-            else:
-                break
-            num_cp, _hid = uint2_spec.unpack_from(vb, pos)
-            pos += 8
-            pos += 16  # tl + br
-            cr, cg, cb = color3_spec.unpack_from(vb, pos)
-            pos += 12
-            pos += 12  # color variants (mystery_1/2/3)
-            stroke_opacity = double_spec.unpack_from(vb, pos)[0]
-            pos += 8
-            brush_id = uint_spec.unpack_from(vb, pos)[0]
-            pos += 4
-            stroke_width = double_spec.unpack_from(vb, pos)[0]
-            pos += 8
-            brush_size = stroke_width * 2.0
-            color = (
-                int((cr & 0xFF00) >> 8),
-                int((cg & 0xFF00) >> 8),
-                int((cb & 0xFF00) >> 8),
-            )
-
-            first = True
-            if vtype == VectorType.BEZIER:
-                num_cp += 1
-            points: List[VectorPoint] = []
-            for i in range(num_cp):
-                pos += 4  # stroke_id
-                if not first:
-                    pos += 4  # cumulative_param
-                px, py = double2_spec.unpack_from(vb, pos)
-                pos += 16
-                if vtype == VectorType.BEZIER:
-                    if i == num_cp - 2 or i == 1:
-                        pos += 32  # 2 double2 handles
-                    if i == num_cp - 1:
-                        pos += 16
-                        first = False
-                        continue
-                curve: Optional[Tuple[float, float]] = None
-                if vtype == VectorType.CURVE and not first:
-                    cx, cy = double2_spec.unpack_from(vb, pos)
-                    pos += 16
-                    curve = (cx, cy)
-                pos += 16  # stroke bbox
-                pos += 4  # flags
-                press, _tilt = float2_spec.unpack_from(vb, pos)
-                pos += 8
-                size_mod = float_spec.unpack_from(vb, pos)[0]
-                pos += 4
-                pos += 8  # pressure_range
-                pw, po = float2_spec.unpack_from(vb, pos)
-                pos += 8
-                pos += 8  # tilt_xy
-                pos += 4  # rotation
-                pos += 4  # texture_seed
-                points.append(
-                    VectorPoint(
-                        x=px,
-                        y=py,
-                        pressure=press,
-                        width_factor=pw,
-                        opacity_factor=po,
-                        size_modulation=size_mod,
-                        curve=curve,
-                    )
-                )
-                first = False
-            if vtype in (VectorType.STANDARD, VectorType.CURVE):
-                pos += 8
-            if vtype == VectorType.CURVE:
-                pos += 16
-            out.append(
-                VectorStroke(
-                    vtype=vtype,
-                    color=color,
-                    stroke_opacity=stroke_opacity,
-                    brush_size=brush_size,
-                    brush_id=brush_id,
-                    points=points,
-                )
-            )
-        except (struct.error, IndexError):
-            break
-    return out
-
-
 # -----------------------------------------------------------------------------
 # Top-level renderers
 # -----------------------------------------------------------------------------
@@ -589,7 +475,7 @@ def _default_brush(brush_id: int) -> BrushStyle:
 
 
 def _render_vector_line_stamp(
-    raw_bytes: bytes,
+    strokes: List[VectorStroke],
     canvas_shape: Tuple[int, int],
     brush_styles: Optional[pd.DataFrame],
     pattern_images: Dict[int, np.ndarray],
@@ -604,7 +490,6 @@ def _render_vector_line_stamp(
     Supersampling factor is chosen from the max ``AntiAlias`` level across
     all strokes so the full-canvas buffer can be reused.
     """
-    strokes = _parse_vector_for_render(raw_bytes)
     canvas_h, canvas_w = canvas_shape
 
     # Resolve each stroke's brush row up front.
@@ -815,11 +700,10 @@ def rasterize_vectors(
     for key, value in list(clip_data.items()):
         if not isinstance(value, bytes):
             continue
+        strokes = parse_vector_binary(value)
         rendered = _render_vector_line_stamp(
-            value, canvas_shape, brush_styles, pattern_images, dfs
+            strokes, canvas_shape, brush_styles, pattern_images, dfs
         )
         if rendered is None:
-            rendered = process_vector_binary(
-                value, len(value), canvas_shape, brush_styles
-            )
+            rendered = rasterize_polylines(strokes, canvas_shape, brush_styles)
         clip_data[key] = rendered

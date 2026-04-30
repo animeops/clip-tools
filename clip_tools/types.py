@@ -5,14 +5,6 @@ import numpy as np
 
 
 @dataclass
-class Point:
-    x: int
-    y: int
-    opacity: float
-    thickness: float
-
-
-@dataclass
 class LayerEntry:
     """A parsed layer image and its classification.
 
