@@ -92,7 +92,7 @@ def augment_layer_df(layer_df: pd.DataFrame) -> pd.DataFrame:
     return layer_df
 
 
-def _save_debug_layer_image(arr: np.ndarray, name: str, key: str, mode: str) -> None:
+def save_debug_layer_image(arr: np.ndarray, name: str, key: str, mode: str) -> None:
     temp_folder = f"temp/{name}/external"
     os.makedirs(temp_folder, exist_ok=True)
     if mode == "raster":
@@ -132,7 +132,7 @@ def process_clip_data(
                 )
 
             if DEBUG:
-                _save_debug_layer_image(processed_layer_arr, name, key, "raster")
+                save_debug_layer_image(processed_layer_arr, name, key, "raster")
 
             layer_id = offscreen["LayerId"]
 
@@ -206,7 +206,7 @@ def process_clip_data(
 
         elif isinstance(value, np.ndarray):
             if DEBUG:
-                _save_debug_layer_image(value, name, key, "vector")
+                save_debug_layer_image(value, name, key, "vector")
 
             vector_object = dfs["VectorObjectList"][
                 dfs["VectorObjectList"]["VectorData"] == key.encode("ascii")

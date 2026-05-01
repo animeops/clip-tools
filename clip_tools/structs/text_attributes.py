@@ -9,7 +9,7 @@ from clip_tools.constants import (
 from clip_tools.utils import read_binary_spec
 
 
-def _parse_font_style_block(blob: bytes, pos: int) -> Dict[str, Any]:
+def parse_font_style_block(blob: bytes, pos: int) -> Dict[str, Any]:
     """Parse one font-style record.
 
     Layout::
@@ -80,7 +80,7 @@ def _parse_font_style_block(blob: bytes, pos: int) -> Dict[str, Any]:
     return out, pos
 
 
-def _parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
+def parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
     """Parse one chunk record.
 
     A "chunk" mirrors a font-style range — there is one chunk per font_style
@@ -111,28 +111,102 @@ def _parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
     return out, pos
 
 
+# TLV tag IDs whose meanings we've identified. Everything else gets stashed
+# in `tlv_records` as raw bytes for downstream consumers.
+TLV_DEFAULT_FONT = 31  # UTF-8 font name
+TLV_FONT_SIZE = 32  # u32 in 1/100 pt
+TLV_TEXT_BBOX = 42  # 4× u32 (x0, y0, x1, y1) in canvas units
+TLV_FALLBACK_FONT = 47  # font reference (display + PS name) or 12-byte stub when empty
+TLV_FONT_ALIASES = 57  # font reference (display + PS name + 4-byte trailer)
+
+
+def parse_tlv_records(blob: bytes, start: int, end: int) -> List[Dict[str, Any]]:
+    """Walk a tag-length-value stream. Each record is `u32 tag + u32 length
+    + length bytes value`. Returns a list of {"tag", "value"} dicts."""
+    records: List[Dict[str, Any]] = []
+    uint_le = struct.Struct("<I")
+    pos = start
+    while pos + 8 <= end:
+        tag = uint_le.unpack_from(blob, pos)[0]
+        pos += 4
+        length = uint_le.unpack_from(blob, pos)[0]
+        pos += 4
+        if pos + length > end:
+            break
+        records.append({"tag": tag, "value": blob[pos : pos + length]})
+        pos += length
+    return records
+
+
+def parse_font_reference(val: bytes) -> Dict[str, Any]:
+    """Decode a font-reference TLV value (used by tags 47 and 57).
+
+    Layout::
+
+        u16 LE  flag (=0x0001 when populated, =0x0000 when stub)
+        u16 LE  display_name_length    (UTF-8 bytes)
+        byte[*] display_name           (UTF-8)
+        u16 LE  ps_name_length         (UTF-8 bytes)
+        byte[*] postscript_name        (UTF-8)
+        byte[4] trailer                (observed `08 07 00 00`)
+    """
+    if len(val) < 4:
+        return {"empty": True, "raw": val}
+    flag = struct.unpack_from("<H", val, 0)[0]
+    if flag == 0:
+        return {"empty": True, "raw": val}
+    pos = 2
+    n1 = struct.unpack_from("<H", val, pos)[0]
+    pos += 2
+    display = val[pos : pos + n1].decode("utf-8", errors="replace")
+    pos += n1
+    if pos + 2 > len(val):
+        return {"display_name": display, "raw": val}
+    n2 = struct.unpack_from("<H", val, pos)[0]
+    pos += 2
+    ps = val[pos : pos + n2].decode("utf-8", errors="replace")
+    pos += n2
+    trailer = val[pos:]
+    return {
+        "display_name": display,
+        "postscript_name": ps,
+        "trailer": trailer,
+    }
+
+
 def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
     """Decode the per-layer ``TextLayerAttributes`` blob.
 
     The blob is style metadata only; the actual text content lives in the
     sibling ``TextLayerString`` column (UTF-8).
 
-    Layout (the section past the chunks block is still under investigation —
-    see ``unknowns.md``)::
+    Top-level layout::
 
         u32 header (=11)
-        u32 font_styles_section_length     # bytes from the field below to
-                                           # the end of the last per-style block
+        u32 font_styles_section_length     # bytes from after num_font_styles
         u32 num_font_styles
-        u32 mystery_a                      # observed values 0/3/16; mirrors
-                                           # the same field after the chunks
-                                           # block
+        u32 mystery_a                      # observed values 0/3/16
         FontStyleBlock × num_font_styles
-        u32 chunks_section_length          # bytes of the next 8 bytes + per-chunk records
+
+        u32 chunks_section_length          # bytes from after this field
         u32 num_chunks
         u32 mystery_a (mirror)
         ChunkBlock × num_chunks
-        ... (rest currently undecoded)
+
+        TLV stream (until end of blob):
+            u32 tag, u32 length, byte[length] value
+
+    Known TLV tags:
+
+    - 31  default_font_name           (UTF-8)
+    - 32  font_size                   (u32 in 1/100 pt)
+    - 42  text_bbox                   (4× u32: x0, y0, x1, y1) — origin doubles
+                                       as the layer's general offset
+    - 57  font_aliases                (font reference: display + PostScript
+                                       names plus a 4-byte trailer)
+
+    Other tags are exposed as raw bytes via ``tlv_records`` for downstream
+    consumers; their semantics are not yet identified.
     """
     uint_le = struct.Struct("<I")
 
@@ -160,7 +234,7 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
 
     out["font_styles"] = []
     for _ in range(out["num_font_styles"]):
-        fs, pos = _parse_font_style_block(attributes, pos)
+        fs, pos = parse_font_style_block(attributes, pos)
         out["font_styles"].append(fs)
 
     if pos != fs_section_end:
@@ -179,7 +253,7 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
 
     out["chunks"] = []
     for i in range(out["num_chunks"]):
-        ck, pos = _parse_chunk_block(
+        ck, pos = parse_chunk_block(
             attributes, pos, is_last=(i == out["num_chunks"] - 1)
         )
         out["chunks"].append(ck)
@@ -188,8 +262,28 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
         out["_chunks_section_unconsumed"] = attributes[pos:chunks_section_end]
         pos = chunks_section_end
 
-    out["_undecoded_tail"] = attributes[pos:]
-    out["_undecoded_tail_offset"] = pos
+    # Everything after the chunks section is a flat TLV stream.
+    tlv_records = parse_tlv_records(attributes, pos, len(attributes))
+    out["tlv_records"] = tlv_records
+
+    # Surface known tags as named fields for ergonomic access.
+    by_tag: Dict[int, bytes] = {r["tag"]: r["value"] for r in tlv_records}
+    if TLV_DEFAULT_FONT in by_tag:
+        try:
+            out["default_font_name"] = by_tag[TLV_DEFAULT_FONT].decode("utf-8")
+        except UnicodeDecodeError:
+            out["default_font_name"] = ""
+    if TLV_FONT_SIZE in by_tag and len(by_tag[TLV_FONT_SIZE]) == 4:
+        out["font_size"] = struct.unpack_from("<I", by_tag[TLV_FONT_SIZE], 0)[0]
+    if TLV_TEXT_BBOX in by_tag and len(by_tag[TLV_TEXT_BBOX]) == 16:
+        out["text_bbox"] = struct.unpack_from("<IIII", by_tag[TLV_TEXT_BBOX], 0)
+        out["general_offset_x"] = out["text_bbox"][0]
+        out["general_offset_y"] = out["text_bbox"][1]
+    if TLV_FONT_ALIASES in by_tag:
+        out["font_aliases"] = parse_font_reference(by_tag[TLV_FONT_ALIASES])
+
+    out["_undecoded_tail"] = b""
+    out["_undecoded_tail_offset"] = len(attributes)
 
     if DEBUG:
         for k, v in out.items():

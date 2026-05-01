@@ -85,7 +85,7 @@ def extract_brush_pattern_images(
     return result
 
 
-def _get_pattern_style_images(
+def get_pattern_style_images(
     dfs: Dict[str, pd.DataFrame], pattern_style_id: int
 ) -> List[int]:
     """Resolve BrushPatternStyle.ImageIndex (packed uint32 array) to image ids."""
@@ -104,7 +104,7 @@ def _get_pattern_style_images(
 # -----------------------------------------------------------------------------
 
 
-def _make_disc_mask(radius_px: float, hardness: float) -> np.ndarray:
+def make_disc_mask(radius_px: float, hardness: float) -> np.ndarray:
     """Anti-aliased grayscale disc stamp for pens / brushes without a texture.
 
     Hardness in [0, 1]: 1.0 = sharp (with a 2-px AA band at the boundary,
@@ -130,7 +130,7 @@ def _make_disc_mask(radius_px: float, hardness: float) -> np.ndarray:
     return (mask * 255).astype(np.uint8)
 
 
-def _disc_alpha_into(
+def disc_alpha_into(
     alpha_buf: np.ndarray,
     cx: float,
     cy: float,
@@ -219,7 +219,7 @@ def _disc_alpha_into(
         np.maximum(region, src_a, out=region)
 
 
-def _composite_alpha_onto(
+def composite_alpha_onto(
     buffer: np.ndarray,
     stroke_alpha: np.ndarray,
     color: Tuple[int, int, int],
@@ -238,7 +238,7 @@ def _composite_alpha_onto(
     buffer[..., 3] = out_a
 
 
-def _stamp_pattern(
+def stamp_pattern(
     buffer: np.ndarray,
     tex_mask: np.ndarray,
     cx: float,
@@ -306,8 +306,8 @@ def _stamp_pattern(
 # -----------------------------------------------------------------------------
 
 
-_CLIP_SUBPIXEL_OFFSET_AA_ON = (-0.001, -0.001)
-_CLIP_SUBPIXEL_OFFSET_AA_OFF = (0.499, -0.501)
+CLIP_SUBPIXEL_OFFSET_AA_ON = (-0.001, -0.001)
+CLIP_SUBPIXEL_OFFSET_AA_OFF = (0.499, -0.501)
 """Sub-pixel offsets applied to vertex coordinates before rasterization.
 
 AA-off: near-half-pixel shift so integer truncation lands at pixel-center.
@@ -315,7 +315,7 @@ AA-on: essentially zero — a tiny nudge avoids exact-boundary numerical edge
 cases while preserving sub-pixel precision on stroke edges."""
 
 
-def _clamped_hermite_tangents(
+def clamped_hermite_tangents(
     pts: List[VectorPoint], tension: float = 0.5
 ) -> List[Tuple[float, float]]:
     """Tangents for a cubic Hermite that never overshoots the control polygon.
@@ -363,7 +363,7 @@ def _clamped_hermite_tangents(
     return out
 
 
-def _sample_curve_points(
+def sample_curve_points(
     pts: List[VectorPoint],
     vtype: VectorType,
     aa_on: bool = True,
@@ -380,13 +380,13 @@ def _sample_curve_points(
     - CURVE: quadratic Bezier using each segment's curve control point.
     - BEZIER: fallback to the same clamped Hermite.
     """
-    dx, dy = _CLIP_SUBPIXEL_OFFSET_AA_ON if aa_on else _CLIP_SUBPIXEL_OFFSET_AA_OFF
+    dx, dy = CLIP_SUBPIXEL_OFFSET_AA_ON if aa_on else CLIP_SUBPIXEL_OFFSET_AA_OFF
     out: List[VectorSample] = []
     if len(pts) < 2:
         return out
 
     tangents = (
-        _clamped_hermite_tangents(pts)
+        clamped_hermite_tangents(pts)
         if vtype in (VectorType.STANDARD, VectorType.BEZIER)
         else []
     )
@@ -438,14 +438,14 @@ def _sample_curve_points(
 # -----------------------------------------------------------------------------
 
 
-_ANTI_ALIAS_TO_SS = {0: 1, 1: 4, 2: 4, 3: 4}
+ANTI_ALIAS_TO_SS = {0: 1, 1: 4, 2: 4, 3: 4}
 """CLIP's ``AntiAlias`` enum → rendering supersampling factor.
 
 AA strength behaves as binary for vector fills: 0 renders without edge
 softening; 1/2/3 all use 4× Y-supersampling plus analytic X coverage."""
 
 
-def _default_brush(brush_id: int) -> BrushStyle:
+def default_brush(brush_id: int) -> BrushStyle:
     """Defaults when a stroke's brush isn't in this file's BrushStyle table
     (external brush reference)."""
     return BrushStyle(
@@ -474,7 +474,7 @@ def _default_brush(brush_id: int) -> BrushStyle:
     )
 
 
-def _render_vector_line_stamp(
+def render_vector_line_stamp(
     strokes: List[VectorStroke],
     canvas_shape: Tuple[int, int],
     brush_styles: Optional[pd.DataFrame],
@@ -501,13 +501,11 @@ def _render_vector_line_stamp(
                 continue
             match = brush_styles[brush_styles["MainId"] == bid]
             brushes[bid] = (
-                BrushStyle.from_row(match.iloc[0])
-                if len(match)
-                else _default_brush(bid)
+                BrushStyle.from_row(match.iloc[0]) if len(match) else default_brush(bid)
             )
 
     ss = max(
-        (_ANTI_ALIAS_TO_SS.get(b.anti_alias, 2) for b in brushes.values()),
+        (ANTI_ALIAS_TO_SS.get(b.anti_alias, 2) for b in brushes.values()),
         default=2,
     )
     buf = np.zeros((canvas_h * ss, canvas_w * ss, 4), dtype=np.float32)
@@ -517,14 +515,14 @@ def _render_vector_line_stamp(
         brush_size = st.brush_size
         stroke_op = st.stroke_opacity
         brush_id = st.brush_id
-        brush = brushes.get(brush_id) or _default_brush(brush_id)
+        brush = brushes.get(brush_id) or default_brush(brush_id)
 
         if brush.spray_flag != 0:
             return None  # caller falls back to Bresenham
 
         tex_mask: Optional[np.ndarray] = None
         if brush.pattern_style > 0:
-            for iid in _get_pattern_style_images(dfs, brush.pattern_style):
+            for iid in get_pattern_style_images(dfs, brush.pattern_style):
                 if iid in pattern_images:
                     tex_mask = pattern_images[iid]
                     break
@@ -532,7 +530,7 @@ def _render_vector_line_stamp(
         # time so it's built at the exact stamp size without scaling artifacts.
         use_analytic_disc = tex_mask is None
 
-        samples = _sample_curve_points(
+        samples = sample_curve_points(
             st.points, st.vtype, aa_on=(brush.anti_alias != 0)
         )
         if not samples:
@@ -595,7 +593,7 @@ def _render_vector_line_stamp(
             else None
         )
 
-        def _draw(s: VectorSample, tangent_rad: float) -> None:
+        def draw_stamp(s: VectorSample, tangent_rad: float) -> None:
             press = max(0.1, s.pressure)
             size = (
                 effective_size
@@ -615,7 +613,7 @@ def _render_vector_line_stamp(
                 # accumulation so their falloff tails build up opacity along
                 # the stroke. Hard pens use MAX to avoid per-stamp AA boundaries
                 # inside the silhouette.
-                _disc_alpha_into(
+                disc_alpha_into(
                     stroke_alpha,
                     s.x * ss,
                     s.y * ss,
@@ -636,7 +634,7 @@ def _render_vector_line_stamp(
                 # (along tex-y); rotating by tangent+π/2 turns that stripe into
                 # the along-stroke direction for continuous lines.
                 rot += tangent_rad + np.pi / 2
-            _stamp_pattern(
+            stamp_pattern(
                 buf,
                 tex_mask,
                 s.x * ss,
@@ -656,7 +654,7 @@ def _render_vector_line_stamp(
             )
         else:
             init_tan = 0.0
-        _draw(last_sample, init_tan)
+        draw_stamp(last_sample, init_tan)
         for i in range(1, len(samples)):
             s = samples[i]
             dx_ = (s.x - last_sample.x) * ss
@@ -665,14 +663,14 @@ def _render_vector_line_stamp(
             accum += d
             if accum >= step_px:
                 tangent = float(np.arctan2(dy_, dx_)) if d > 0 else init_tan
-                _draw(s, tangent)
+                draw_stamp(s, tangent)
                 accum = 0.0
             last_sample = s
 
         # For disc-stamped strokes we accumulated a silhouette via MAX; now
         # alpha-composite it onto the main buffer as a single solid-color pass.
         if use_analytic_disc and stroke_alpha is not None:
-            _composite_alpha_onto(buf, stroke_alpha, color)
+            composite_alpha_onto(buf, stroke_alpha, color)
 
     if ss > 1:
         buf = buf.reshape(canvas_h, ss, canvas_w, ss, 4).mean(axis=(1, 3))
@@ -701,7 +699,7 @@ def rasterize_vectors(
         if not isinstance(value, bytes):
             continue
         strokes = parse_vector_binary(value)
-        rendered = _render_vector_line_stamp(
+        rendered = render_vector_line_stamp(
             strokes, canvas_shape, brush_styles, pattern_images, dfs
         )
         if rendered is None:

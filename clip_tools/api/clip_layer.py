@@ -234,7 +234,7 @@ class ClipLayer:
 
             if len(self.children) > 0:
                 layers_to_composit = prepended_layers + self.children
-                composited = self._composit_layers(layers_to_composit)
+                composited = self.composit_layers(layers_to_composit)
                 # ClipStudio sometimes flattens group strokes into the group's
                 # own cached raster and leaves child leaves empty. If child
                 # composition produced nothing, fall back to the cached group.
@@ -253,7 +253,7 @@ class ClipLayer:
         self._composited = composited
         return arr_to_pil(composited)
 
-    def _composit_layers(self, layer_list: List[ClipLayer]) -> np.ndarray:
+    def composit_layers(self, layer_list: List[ClipLayer]) -> np.ndarray:
         """
         layer_list is a list of tuples (id, image)
         """

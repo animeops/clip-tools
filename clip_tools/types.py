@@ -132,48 +132,48 @@ class BrushStyle:
         signal when CLIP adds/removes BrushStyle fields between versions.
         """
 
-        def _f(key, default=0.0):
+        def as_float(key, default=0.0):
             v = row[key]
             if v is None or (isinstance(v, float) and np.isnan(v)):
                 return default
             return float(v)
 
-        def _i(key, default=0):
+        def as_int(key, default=0):
             v = row[key]
             if v is None or (isinstance(v, float) and np.isnan(v)):
                 return default
             return int(v)
 
-        def _b(key):
+        def as_bytes(key):
             v = row[key]
             return v if isinstance(v, (bytes, bytearray)) else b""
 
         return cls(
-            main_id=_i("MainId"),
-            pattern_style=_i("PatternStyle"),
-            texture_pattern=_i("TexturePattern"),
-            hardness=_f("Hardness", 1.0),
-            thickness_base=_f("ThicknessBase", 1.0),
-            anti_alias=_i("AntiAlias", 2),
-            flow_base=_f("FlowBase", 1.0),
-            interval_base=_f("IntervalBase", 1.0),
-            auto_interval_type=_i("AutoIntervalType"),
-            rotation_base=_f("RotationBase"),
-            rotation_random=_f("RotationRandom"),
-            rotation_effector=_i("RotationEffector"),
-            texture_scale=_f("TextureScale", 1.0),
-            texture_rotate=_f("TextureRotate"),
-            texture_offset_x=_f("TextureOffsetX"),
-            texture_offset_y=_f("TextureOffsetY"),
-            texture_density_base=_f("TextureDensityBase", 1.0),
-            composite_mode=_i("CompositeMode"),
-            spray_flag=_i("SprayFlag"),
-            spray_size_base=_f("SpraySizeBase"),
-            spray_density_base=_f("SprayDensityBase"),
-            spray_bias=_f("SprayBias"),
-            size_effector=_b("SizeEffector"),
-            opacity_effector=_b("OpacityEffector"),
-            flow_effector=_b("FlowEffector"),
-            thickness_effector=_b("ThicknessEffector"),
-            interval_effector=_b("IntervalEffector"),
+            main_id=as_int("MainId"),
+            pattern_style=as_int("PatternStyle"),
+            texture_pattern=as_int("TexturePattern"),
+            hardness=as_float("Hardness", 1.0),
+            thickness_base=as_float("ThicknessBase", 1.0),
+            anti_alias=as_int("AntiAlias", 2),
+            flow_base=as_float("FlowBase", 1.0),
+            interval_base=as_float("IntervalBase", 1.0),
+            auto_interval_type=as_int("AutoIntervalType"),
+            rotation_base=as_float("RotationBase"),
+            rotation_random=as_float("RotationRandom"),
+            rotation_effector=as_int("RotationEffector"),
+            texture_scale=as_float("TextureScale", 1.0),
+            texture_rotate=as_float("TextureRotate"),
+            texture_offset_x=as_float("TextureOffsetX"),
+            texture_offset_y=as_float("TextureOffsetY"),
+            texture_density_base=as_float("TextureDensityBase", 1.0),
+            composite_mode=as_int("CompositeMode"),
+            spray_flag=as_int("SprayFlag"),
+            spray_size_base=as_float("SpraySizeBase"),
+            spray_density_base=as_float("SprayDensityBase"),
+            spray_bias=as_float("SprayBias"),
+            size_effector=as_bytes("SizeEffector"),
+            opacity_effector=as_bytes("OpacityEffector"),
+            flow_effector=as_bytes("FlowEffector"),
+            thickness_effector=as_bytes("ThicknessEffector"),
+            interval_effector=as_bytes("IntervalEffector"),
         )

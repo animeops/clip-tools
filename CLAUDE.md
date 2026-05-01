@@ -42,3 +42,8 @@ Binary format parsing lives in `clip_tools/structs/` — chunk parsing, layer bl
 - Folder type detection relies on Japanese naming conventions with fullwidth↔halfwidth normalization (`utils.py`)
 - Layer compositing uses alpha blending and homography transforms via OpenCV and Pillow
 - The package exports `FileProcessor`, `ClipImage`, `ClipLayer` from `clip_tools/__init__.py`
+
+## Naming conventions
+
+- **Do not use leading-underscore names for module-level helpers, constants, or class methods.** Everything is public; if something is meant to be internal, scope it via module structure or local closures instead. Dunder names (`__init__`, `__all__`, etc.) are unaffected.
+- Binary parsers in `clip_tools/structs/` should be pure (bytes in, structured data out). Renderers and processors should not touch raw bytes — all `struct.Struct` / `struct.unpack` / `np.frombuffer` calls live under `structs/`.
