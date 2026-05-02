@@ -315,52 +315,78 @@ AA-on: essentially zero — a tiny nudge avoids exact-boundary numerical edge
 cases while preserving sub-pixel precision on stroke edges."""
 
 
-def clamped_hermite_tangents(
-    pts: List[VectorPoint], tension: float = 0.5
-) -> List[Tuple[float, float]]:
-    """Tangents for a cubic Hermite that never overshoots the control polygon.
+def standard_spline_point(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    p3: Tuple[float, float],
+    p4: Tuple[float, float],
+    p5: Tuple[float, float],
+    t: float,
+) -> Tuple[float, float]:
+    """One point on the STANDARD vector spline's segment from p2 → p3.
 
-    Interior tangent = average of incoming/outgoing unit directions, scaled by
-    the shorter adjacent chord × tension. Two additional guards:
-    - At a sharp cusp (direction reversal), the unit directions cancel and
-      the tangent collapses to zero, preserving a hard corner.
-    - Beyond a configurable angle threshold (default 90°) the tangent is
-      attenuated linearly with the cosine so moderate-but-sharp corners
-      (like calligraphy zig-zags) don't get over-rounded.
+    6-point local interpolating spline with piecewise-quadratic basis
+    weights split at t = 0.5. Interpolates p2 at t=0 and p3 at t=1; the
+    outer four points only shape the curve. Divisor 99 normalizes the
+    weight sum.
+    """
+    if t >= 0.5:
+        w0 = 2 * t * t - 6 * t + 4
+        w1 = -16 * t * t + 44 * t - 28
+        w2 = 96 * t * t - 260 * t + 164
+        w3 = -164 * t * t + 328 * t - 65
+        w4 = 96 * t * t - 124 * t + 28
+        w5 = -14 * t * t + 18 * t - 4
+    else:
+        w0 = -14 * t * t + 10 * t
+        w1 = 96 * t * t - 68 * t
+        w2 = -164 * t * t + 99
+        w3 = 96 * t * t + 68 * t
+        w4 = -16 * t * t - 12 * t
+        w5 = 2 * t * t + 2 * t
+    inv = 1.0 / 99.0
+    x = (
+        w0 * p0[0] + w1 * p1[0] + w2 * p2[0] + w3 * p3[0] + w4 * p4[0] + w5 * p5[0]
+    ) * inv
+    y = (
+        w0 * p0[1] + w1 * p1[1] + w2 * p2[1] + w3 * p3[1] + w4 * p4[1] + w5 * p5[1]
+    ) * inv
+    return x, y
+
+
+def standard_window(
+    pts: List[VectorPoint], i: int
+) -> Tuple[
+    Tuple[float, float],
+    Tuple[float, float],
+    Tuple[float, float],
+    Tuple[float, float],
+    Tuple[float, float],
+    Tuple[float, float],
+]:
+    """6-point window for the segment from pts[i] → pts[i+1].
+
+    Endpoints are duplicated when the window walks off either end of the
+    polyline (the only convention compatible with the formula's
+    "interpolates p2 and p3" behavior).
     """
     n = len(pts)
-    out: List[Tuple[float, float]] = []
-    for i in range(n):
-        if i == 0:
-            tx = (pts[1].x - pts[0].x) * tension
-            ty = (pts[1].y - pts[0].y) * tension
-        elif i == n - 1:
-            tx = (pts[-1].x - pts[-2].x) * tension
-            ty = (pts[-1].y - pts[-2].y) * tension
-        else:
-            v1x, v1y = pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y
-            v2x, v2y = pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y
-            m1 = (v1x * v1x + v1y * v1y) ** 0.5
-            m2 = (v2x * v2x + v2y * v2y) ** 0.5
-            if m1 < 1e-6 or m2 < 1e-6:
-                tx = ty = 0.0
-            else:
-                u1x, u1y = v1x / m1, v1y / m1
-                u2x, u2y = v2x / m2, v2y / m2
-                # cos(angle-between-directions); 1 = straight, 0 = right-angle, -1 = cusp
-                dot = u1x * u2x + u1y * u2y
-                # Fade tangent with angle: full strength at 0° bend, zero at ≥90°
-                corner_factor = max(0.0, dot)
-                ax, ay = u1x + u2x, u1y + u2y
-                amag = (ax * ax + ay * ay) ** 0.5
-                if amag < 1e-6:
-                    tx = ty = 0.0
-                else:
-                    scale = min(m1, m2) * tension * 2 * corner_factor
-                    tx = ax / amag * scale
-                    ty = ay / amag * scale
-        out.append((tx, ty))
-    return out
+    p = lambda j: (pts[max(0, min(n - 1, j))].x, pts[max(0, min(n - 1, j))].y)
+    return p(i - 2), p(i - 1), p(i), p(i + 1), p(i + 2), p(i + 3)
+
+
+def quadratic_bezier_point(
+    p0: Tuple[float, float],
+    p1: Tuple[float, float],
+    p2: Tuple[float, float],
+    t: float,
+) -> Tuple[float, float]:
+    u = 1.0 - t
+    return (
+        u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+        u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1],
+    )
 
 
 def sample_curve_points(
@@ -372,47 +398,37 @@ def sample_curve_points(
 
     Applies the sub-pixel offset used by CLIP's vector-fill rasterizer.
 
-    - STANDARD: clamped cubic Hermite (non-overshooting Catmull-Rom). CLIP
-      stores sparse control points and renders a smoothed path between them
-      (what the user sees is not the polyline of raw points). Uniform
-      Catmull-Rom overshoots on tight peaks; the clamped-tangent variant
-      avoids this by shrinking the tangent toward zero at sharp corners.
-    - CURVE: quadratic Bezier using each segment's curve control point.
-    - BEZIER: fallback to the same clamped Hermite.
+    - STANDARD: 6-point local piecewise-quadratic spline (see
+      `standard_spline_point`).
+    - CURVE: quadratic Bezier chain. Each non-first control point owns one
+      "curve" handle; the segment from control[i] → control[i+1] uses
+      `(control[i], control[i+1].curve, control[i+1])`.
+    - BEZIER: should be a cubic Bezier chain, but the parser currently
+      captures handles only at controls i=1, i=N-2, i=N-1 (over-fit to
+      3-/4-control samples). Until handle parsing is generalized for 5+
+      control strokes, fall back to the STANDARD spline so paths still
+      come out smooth. See unknowns.md.
     """
     dx, dy = CLIP_SUBPIXEL_OFFSET_AA_ON if aa_on else CLIP_SUBPIXEL_OFFSET_AA_OFF
     out: List[VectorSample] = []
     if len(pts) < 2:
         return out
 
-    tangents = (
-        clamped_hermite_tangents(pts)
-        if vtype in (VectorType.STANDARD, VectorType.BEZIER)
-        else []
-    )
+    use_spline = vtype in (VectorType.STANDARD, VectorType.BEZIER)
 
     for i in range(len(pts) - 1):
         p0, p1 = pts[i], pts[i + 1]
         seg_len = max(1, int(np.hypot(p1.x - p0.x, p1.y - p0.y)))
         n = max(2, seg_len)
+
+        window = standard_window(pts, i) if use_spline else None
+
         for s in range(n):
             t = s / (n - 1)
             if vtype == VectorType.CURVE and p1.curve is not None:
-                cx, cy = p1.curve
-                mt = 1 - t
-                x = mt * mt * p0.x + 2 * mt * t * cx + t * t * p1.x
-                y = mt * mt * p0.y + 2 * mt * t * cy + t * t * p1.y
-            elif tangents:
-                t2 = t * t
-                t3 = t2 * t
-                h00 = 2 * t3 - 3 * t2 + 1
-                h10 = t3 - 2 * t2 + t
-                h01 = -2 * t3 + 3 * t2
-                h11 = t3 - t2
-                m0x, m0y = tangents[i]
-                m1x, m1y = tangents[i + 1]
-                x = h00 * p0.x + h10 * m0x + h01 * p1.x + h11 * m1x
-                y = h00 * p0.y + h10 * m0y + h01 * p1.y + h11 * m1y
+                x, y = quadratic_bezier_point((p0.x, p0.y), p1.curve, (p1.x, p1.y), t)
+            elif window is not None:
+                x, y = standard_spline_point(*window, t)
             else:
                 x = p0.x + t * (p1.x - p0.x)
                 y = p0.y + t * (p1.y - p0.y)

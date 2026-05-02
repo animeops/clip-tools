@@ -444,7 +444,7 @@ def composite_glow_layer(
 ) -> np.ndarray:
     """Glow Dodge / Add (Glow) compositing.
 
-    branching:
+    Branching:
 
     1. ``blend_alpha == 0`` → base unchanged.
     2. Pre-multiply blend RGB by its own alpha to get ``bg_pm``.
