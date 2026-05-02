@@ -111,13 +111,24 @@ def parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
     return out, pos
 
 
-# TLV tag IDs whose meanings we've identified. Everything else gets stashed
-# in `tlv_records` as raw bytes for downstream consumers.
+# TLV tag IDs. Tags labelled
+# "unknown" are unidentified there too.
+TLV_PARAGRAPH_ALIGN = 12  # paragraph-run array (start, length, align byte)
+TLV_PARAGRAPH_UNK_18 = 18  # same shape as 12/16/20; specific property unknown
+TLV_PARAGRAPH_UNDERLINE = 16
+TLV_PARAGRAPH_STRIKE = 20
+TLV_ASPECT_RATIO = 26  # f64 at offset 16 of the value
 TLV_DEFAULT_FONT = 31  # UTF-8 font name
 TLV_FONT_SIZE = 32  # u32 in 1/100 pt
-TLV_TEXT_BBOX = 42  # 4× u32 (x0, y0, x1, y1) in canvas units
-TLV_FALLBACK_FONT = 47  # font reference (display + PS name) or 12-byte stub when empty
-TLV_FONT_ALIASES = 57  # font reference (display + PS name + 4-byte trailer)
+TLV_UNIT = 33  # u32; expected 1, observed 0 in our samples
+TLV_OUTLINE_COLOR = 34  # 3× i32 normalized to [0, 1]
+TLV_TEXT_BBOX = 42  # 4× i32 (x0, y0, x1, y1)
+TLV_SECONDARY_FONT = 47  # font reference with i16 prefix + (50, 0) markers
+TLV_FONT_ALIASES = 57  # i16 N + N × (display, postscript) UTF-8 pairs + i32
+TLV_SKEW_ANGLE_1 = 59
+TLV_SKEW_ANGLE_2 = 60
+TLV_BOX_SIZE = 63  # 2× i32
+TLV_QUAD_VERTS = 64  # 8× i32, divided by 100 → 4 (x, y) corners
 
 
 def parse_tlv_records(blob: bytes, start: int, end: int) -> List[Dict[str, Any]]:
@@ -138,40 +149,111 @@ def parse_tlv_records(blob: bytes, start: int, end: int) -> List[Dict[str, Any]]
     return records
 
 
-def parse_font_reference(val: bytes) -> Dict[str, Any]:
-    """Decode a font-reference TLV value (used by tags 47 and 57).
+def parse_paragraph_runs(val: bytes) -> List[Dict[str, Any]]:
+    """Decode a paragraph-runs TLV value (tags 12, 16, 18, 20).
 
     Layout::
 
-        u16 LE  flag (=0x0001 when populated, =0x0000 when stub)
-        u16 LE  display_name_length    (UTF-8 bytes)
-        byte[*] display_name           (UTF-8)
-        u16 LE  ps_name_length         (UTF-8 bytes)
-        byte[*] postscript_name        (UTF-8)
-        byte[4] trailer                (observed `08 07 00 00`)
+        i32      n
+        per run (14 bytes):
+            i32  start
+            i32  length
+            i32  unk1
+            i8   value     # the actual property (alignment for tag 12, etc.)
+            i8   unk2
+
+    A zero-length value (no leading count) means "no runs / feature off" —
+    seen on tags 16 and 20 in our current samples.
     """
     if len(val) < 4:
-        return {"empty": True, "raw": val}
-    flag = struct.unpack_from("<H", val, 0)[0]
-    if flag == 0:
-        return {"empty": True, "raw": val}
+        return []
+    n = struct.unpack_from("<i", val, 0)[0]
+    out = []
+    pos = 4
+    for _ in range(n):
+        if pos + 14 > len(val):
+            break
+        start = struct.unpack_from("<i", val, pos)[0]
+        length = struct.unpack_from("<i", val, pos + 4)[0]
+        unk1 = struct.unpack_from("<i", val, pos + 8)[0]
+        value = struct.unpack_from("<b", val, pos + 12)[0]
+        unk2 = struct.unpack_from("<b", val, pos + 13)[0]
+        out.append(
+            {
+                "start": start,
+                "length": length,
+                "unk1": unk1,
+                "value": value,
+                "unk2": unk2,
+            }
+        )
+        pos += 14
+    return out
+
+
+def parse_font_aliases(val: bytes) -> Dict[str, Any]:
+    """Decode TLV tag 57: a list of (display_name, postscript_name) pairs.
+
+    Layout::
+
+        i16              n (number of font pairs)
+        per pair:
+            i16          display_name_length (UTF-8 bytes)
+            byte[*]      display_name        (UTF-8)
+            i16          ps_name_length      (UTF-8 bytes)
+            byte[*]      postscript_name     (UTF-8)
+        i32              trailer (observed 0x00000708 = 1800)
+    """
+    if len(val) < 2:
+        return {"font_list": [], "trailer": 0}
+    n = struct.unpack_from("<h", val, 0)[0]
     pos = 2
-    n1 = struct.unpack_from("<H", val, pos)[0]
-    pos += 2
-    display = val[pos : pos + n1].decode("utf-8", errors="replace")
-    pos += n1
-    if pos + 2 > len(val):
-        return {"display_name": display, "raw": val}
-    n2 = struct.unpack_from("<H", val, pos)[0]
-    pos += 2
-    ps = val[pos : pos + n2].decode("utf-8", errors="replace")
-    pos += n2
-    trailer = val[pos:]
-    return {
-        "display_name": display,
-        "postscript_name": ps,
-        "trailer": trailer,
+    font_list = []
+    for _ in range(n):
+        if pos + 2 > len(val):
+            break
+        n1 = struct.unpack_from("<h", val, pos)[0]
+        pos += 2
+        display = val[pos : pos + n1].decode("utf-8", errors="replace")
+        pos += n1
+        if pos + 2 > len(val):
+            break
+        n2 = struct.unpack_from("<h", val, pos)[0]
+        pos += 2
+        ps = val[pos : pos + n2].decode("utf-8", errors="replace")
+        pos += n2
+        font_list.append({"display_name": display, "postscript_name": ps})
+    trailer = struct.unpack_from("<i", val, pos)[0] if pos + 4 <= len(val) else None
+    return {"font_list": font_list, "trailer": trailer}
+
+
+def parse_secondary_font(val: bytes) -> Dict[str, Any]:
+    """Decode TLV tag 47: a secondary font reference with a structured prefix.
+
+    Layout::
+
+        i16              flag      (varies; 0 when empty, non-zero otherwise)
+        i32              marker_a  (always 50)
+        i32              marker_b  (always 0)
+        i16              name_length
+        byte[*]          font_name (UTF-8)
+    """
+    if len(val) < 12:
+        return {"empty": True, "raw": val}
+    flag = struct.unpack_from("<h", val, 0)[0]
+    marker_a = struct.unpack_from("<i", val, 2)[0]
+    marker_b = struct.unpack_from("<i", val, 6)[0]
+    name_len = struct.unpack_from("<h", val, 10)[0]
+    name = val[12 : 12 + name_len].decode("utf-8", errors="replace") if name_len else ""
+    out = {
+        "flag": flag,
+        "marker_a": marker_a,
+        "marker_b": marker_b,
+        "font_name": name,
     }
+    if marker_a != 50 or marker_b != 0:
+        out["unexpected_markers"] = True
+    return out
 
 
 def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
@@ -198,15 +280,26 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
 
     Known TLV tags:
 
+    - 12  paragraph_align             (paragraph runs)
+    - 16  paragraph_underline         (paragraph runs)
+    - 18  paragraph_unk_18            (paragraph runs; specific property unknown)
+    - 20  paragraph_strike            (paragraph runs)
+    - 26  aspect_ratio                (f64 at offset 16 of the value)
     - 31  default_font_name           (UTF-8)
-    - 32  font_size                   (u32 in 1/100 pt)
-    - 42  text_bbox                   (4× u32: x0, y0, x1, y1) — origin doubles
+    - 32  font_size                   (i32 in 1/100 pt)
+    - 33  unit                        (i32; expected 1)
+    - 34  outline_color               (3× i32 normalized to [0, 1])
+    - 42  text_bbox                   (4× i32: x0, y0, x1, y1) — origin doubles
                                        as the layer's general offset
-    - 57  font_aliases                (font reference: display + PostScript
-                                       names plus a 4-byte trailer)
+    - 47  secondary_font              (font reference with prefix flags)
+    - 57  font_aliases                (list of (display, PostScript) pairs)
+    - 59  skew_angle_1
+    - 60  skew_angle_2
+    - 63  box_size                    (2× i32)
+    - 64  quad_verts                  (8× i32 / 100 → 4 (x, y) corners)
 
-    Other tags are exposed as raw bytes via ``tlv_records`` for downstream
-    consumers; their semantics are not yet identified.
+    Other tags are exposed as raw bytes via ``tlv_records``; see
+    ``unknowns.md`` for the still-unidentified set.
     """
     uint_le = struct.Struct("<I")
 
@@ -268,19 +361,46 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
 
     # Surface known tags as named fields for ergonomic access.
     by_tag: Dict[int, bytes] = {r["tag"]: r["value"] for r in tlv_records}
+
     if TLV_DEFAULT_FONT in by_tag:
         try:
             out["default_font_name"] = by_tag[TLV_DEFAULT_FONT].decode("utf-8")
         except UnicodeDecodeError:
             out["default_font_name"] = ""
     if TLV_FONT_SIZE in by_tag and len(by_tag[TLV_FONT_SIZE]) == 4:
-        out["font_size"] = struct.unpack_from("<I", by_tag[TLV_FONT_SIZE], 0)[0]
+        out["font_size"] = struct.unpack_from("<i", by_tag[TLV_FONT_SIZE], 0)[0]
+    if TLV_UNIT in by_tag and len(by_tag[TLV_UNIT]) == 4:
+        out["unit"] = struct.unpack_from("<i", by_tag[TLV_UNIT], 0)[0]
+    if TLV_OUTLINE_COLOR in by_tag and len(by_tag[TLV_OUTLINE_COLOR]) == 12:
+        chans = struct.unpack_from("<iii", by_tag[TLV_OUTLINE_COLOR], 0)
+        out["outline_color"] = tuple(c / (2**32 - 1) for c in chans)
     if TLV_TEXT_BBOX in by_tag and len(by_tag[TLV_TEXT_BBOX]) == 16:
-        out["text_bbox"] = struct.unpack_from("<IIII", by_tag[TLV_TEXT_BBOX], 0)
+        out["text_bbox"] = struct.unpack_from("<iiii", by_tag[TLV_TEXT_BBOX], 0)
         out["general_offset_x"] = out["text_bbox"][0]
         out["general_offset_y"] = out["text_bbox"][1]
+    if TLV_ASPECT_RATIO in by_tag and len(by_tag[TLV_ASPECT_RATIO]) >= 32:
+        out["aspect_ratio"] = struct.unpack_from("<d", by_tag[TLV_ASPECT_RATIO], 16)[0]
+    if TLV_SECONDARY_FONT in by_tag:
+        out["secondary_font"] = parse_secondary_font(by_tag[TLV_SECONDARY_FONT])
     if TLV_FONT_ALIASES in by_tag:
-        out["font_aliases"] = parse_font_reference(by_tag[TLV_FONT_ALIASES])
+        out["font_aliases"] = parse_font_aliases(by_tag[TLV_FONT_ALIASES])
+    if TLV_SKEW_ANGLE_1 in by_tag and len(by_tag[TLV_SKEW_ANGLE_1]) == 4:
+        out["skew_angle_1"] = struct.unpack_from("<i", by_tag[TLV_SKEW_ANGLE_1], 0)[0]
+    if TLV_SKEW_ANGLE_2 in by_tag and len(by_tag[TLV_SKEW_ANGLE_2]) == 4:
+        out["skew_angle_2"] = struct.unpack_from("<i", by_tag[TLV_SKEW_ANGLE_2], 0)[0]
+    if TLV_BOX_SIZE in by_tag and len(by_tag[TLV_BOX_SIZE]) == 8:
+        out["box_size"] = struct.unpack_from("<ii", by_tag[TLV_BOX_SIZE], 0)
+    if TLV_QUAD_VERTS in by_tag and len(by_tag[TLV_QUAD_VERTS]) == 32:
+        verts = struct.unpack_from("<8i", by_tag[TLV_QUAD_VERTS], 0)
+        out["quad_verts"] = tuple(v / 100 for v in verts)
+    for tag, key in (
+        (TLV_PARAGRAPH_ALIGN, "paragraph_align"),
+        (TLV_PARAGRAPH_UNDERLINE, "paragraph_underline"),
+        (TLV_PARAGRAPH_STRIKE, "paragraph_strike"),
+        (TLV_PARAGRAPH_UNK_18, "paragraph_unk_18"),
+    ):
+        if tag in by_tag:
+            out[key] = parse_paragraph_runs(by_tag[tag])
 
     out["_undecoded_tail"] = b""
     out["_undecoded_tail_offset"] = len(attributes)

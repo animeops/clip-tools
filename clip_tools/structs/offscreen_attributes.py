@@ -135,9 +135,13 @@ def process_offscreen_attributes(attribute: bytes) -> Dict[str, Any]:
 
     if attr_ds["has_init_color"]:
         data, pos = read_binary_spec(attribute, uint4_spec, pos)
-        # 16-byte trailer — zeros in every sample. Likely appears only for
-        # non-white init colors; semantics not yet cracked.
-        attr_ds["init_color_extra"] = data
+        # 4× u32, each scaled by >> 24 to extract the high byte = an 8-bit
+        # color channel (RGBA). In
+        # observed samples this is all zeros (paper layer's color is in the
+        # `init_color` field above; the extra 4-channel form is for
+        # non-default tinted colors).
+        attr_ds["init_color_extra"] = tuple(min(255, v >> 24) for v in data)
+        attr_ds["init_color_extra_raw"] = data
 
     # --- BlockSize section ---
     data, pos = read_binary_spec(attribute, uint_spec, pos)

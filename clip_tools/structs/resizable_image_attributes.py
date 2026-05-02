@@ -1,121 +1,112 @@
-from typing import Dict, Any
 import struct
+from typing import Any, Dict
+
 import numpy as np
 
-from clip_tools.utils import read_binary_spec
 from clip_tools.constants import DEBUG
+from clip_tools.utils import read_binary_spec
 
 
 def process_resizable_image_attributes(attributes: bytes) -> Dict[str, Any]:
-    uint_spec = struct.Struct(">I")
-    uint2_spec = struct.Struct(">II")
-    uint4_spec = struct.Struct(">IIII")
-    float_spec = struct.Struct(">f")
-    float2_spec = struct.Struct(">ff")
-    float4_spec = struct.Struct(">ffff")
-    double_spec = struct.Struct(">d")
-    double2_spec = struct.Struct(">dd")
+    """Decode a ``ResizableImageInfo`` blob.
 
-    # spec for byte (0, 255)
-    byte2_spec = struct.Struct("<BB")
-    byte4_spec = struct.Struct("<BBBB")
-    byte16_spec = struct.Struct("<BBBBBBBBBBBBBBBB")
+    Used by ClipStudio's "transform" feature: a layer's pixel content
+    (``original_width × original_height``) is mapped into a four-corner
+    polygon on the canvas via a homography. ``clip_layer.py`` only consumes
+    ``source_coords`` and ``polygon_coords``; everything else is exposed for
+    completeness.
 
-    ushort3_spec = struct.Struct("<HHH")
+    No sample exercises this code path in the current corpus
+    (``tests/test_data/test000–003.clip`` and ``wn_*.clip``), so the field
+    layout below is taken as-is from the legacy parser and the unknowns are
+    left as raw integers. See ``unknowns.md``.
 
-    # color3_spec = struct.Struct('>III')
-    color3_spec = struct.Struct(">III")
+    Layout (all big-endian)::
 
-    # enum to map int to text
+        u32       header (=120)
+        u32       unknown_a
+        u32[4]    unknown_b
+        u32[2]    unknown_c
+        u32[2]    original_width, original_height
+        f64[2]    zoom_x, zoom_y
+        f64       rotation
+        f64[2]    offset_x, offset_y
+        f64[2]    origin_x, origin_y
+        u32[4]    unknown_d
+        u32[2]    unknown_e
+        f64[2]    top_left_x, top_left_y
+        f64[2]    top_right_x, top_right_y
+        f64[2]    bottom_left_x, bottom_left_y
+        f64[2]    bottom_right_x, bottom_right_y
+    """
+    uint_be = struct.Struct(">I")
+    uint2_be = struct.Struct(">II")
+    uint4_be = struct.Struct(">IIII")
+    double_be = struct.Struct(">d")
+    double2_be = struct.Struct(">dd")
 
-    attr_arr = []
-    attr_ds = {}
-
+    out: Dict[str, Any] = {}
     pos = 0
-    data, pos = read_binary_spec(attributes, uint_spec, pos)
 
-    if data[0] == 120:
-        attr_arr.append(("header", data[0]))
-        attr_ds["header"] = data[0]
-    else:
-        raise Exception(f"Invalid header (expected 11, got {data})")
+    (header,), pos = read_binary_spec(attributes, uint_be, pos)
+    if header != 120:
+        raise ValueError(
+            f"Invalid resizable-image attributes header: expected 120, got {header}"
+        )
+    out["header"] = header
 
-    data, pos = read_binary_spec(attributes, uint_spec, pos)
-    attr_arr.append(("?", data))
+    (out["unknown_a"],), pos = read_binary_spec(attributes, uint_be, pos)
+    out["unknown_b"], pos = read_binary_spec(attributes, uint4_be, pos)
+    out["unknown_c"], pos = read_binary_spec(attributes, uint2_be, pos)
 
-    data, pos = read_binary_spec(attributes, uint4_spec, pos)
-    attr_arr.append(("?", data))
+    (out["original_width"], out["original_height"]), pos = read_binary_spec(
+        attributes, uint2_be, pos
+    )
 
-    data, pos = read_binary_spec(attributes, uint2_spec, pos)
-    attr_arr.append(("?", data))
+    (zoom_x, zoom_y), pos = read_binary_spec(attributes, double2_be, pos)
+    out["zoom"] = (zoom_x, zoom_y)
 
-    data, pos = read_binary_spec(attributes, uint2_spec, pos)
-    attr_arr.append(("original_width, original_height", data))
-    attr_ds["original_width"] = data[0]
-    attr_ds["original_height"] = data[1]
+    (out["rotation"],), pos = read_binary_spec(attributes, double_be, pos)
 
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("zoom_x, zoom_y", data))
-    attr_ds["zoom"] = data
+    (out["offset_x"], out["offset_y"]), pos = read_binary_spec(
+        attributes, double2_be, pos
+    )
+    (out["origin_x"], out["origin_y"]), pos = read_binary_spec(
+        attributes, double2_be, pos
+    )
 
-    data, pos = read_binary_spec(attributes, double_spec, pos)
-    attr_arr.append(("rotation", data))
-    attr_ds["rotation"] = data[0]
+    out["unknown_d"], pos = read_binary_spec(attributes, uint4_be, pos)
+    out["unknown_e"], pos = read_binary_spec(attributes, uint2_be, pos)
 
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("offset", data))
-    attr_ds["offset_x"] = data[0]
-    attr_ds["offset_y"] = data[1]
+    out["top_left"], pos = read_binary_spec(attributes, double2_be, pos)
+    out["top_right"], pos = read_binary_spec(attributes, double2_be, pos)
+    out["bottom_left"], pos = read_binary_spec(attributes, double2_be, pos)
+    out["bottom_right"], pos = read_binary_spec(attributes, double2_be, pos)
 
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("origin", data))
-    attr_ds["origin_x"] = data[0]
-    attr_ds["origi_y"] = data[1]
-
-    data, pos = read_binary_spec(attributes, uint4_spec, pos)
-    attr_arr.append(("?", data))
-
-    data, pos = read_binary_spec(attributes, uint2_spec, pos)
-    attr_arr.append(("?", data))
-
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("top_left", data))
-    attr_ds["top_left"] = data
-
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("top_right", data))
-    attr_ds["top_right"] = data
-
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("bottom_left", data))
-    attr_ds["bottom_left"] = data
-
-    data, pos = read_binary_spec(attributes, double2_spec, pos)
-    attr_arr.append(("bottom_right", data))
-    attr_ds["bottom_right"] = data
-
-    attr_ds["polygon_coords"] = np.stack(
+    out["polygon_coords"] = np.stack(
         [
-            attr_ds["top_left"],
-            attr_ds["top_right"],
-            attr_ds["bottom_right"],
-            attr_ds["bottom_left"],
+            out["top_left"],
+            out["top_right"],
+            out["bottom_right"],
+            out["bottom_left"],
         ],
         axis=0,
     )
-
-    attr_ds["source_coords"] = np.stack(
+    out["source_coords"] = np.stack(
         [
             [0, 0],
-            [attr_ds["original_width"], 0],
-            [attr_ds["original_width"], attr_ds["original_height"]],
-            [0, attr_ds["original_height"]],
+            [out["original_width"], 0],
+            [out["original_width"], out["original_height"]],
+            [0, out["original_height"]],
         ],
         axis=0,
     )
 
-    if DEBUG:
-        for row in attr_arr:
-            print(row)
+    if pos != len(attributes):
+        out["trailing_bytes"] = attributes[pos:]
 
-    return attr_ds
+    if DEBUG:
+        for k, v in out.items():
+            print(f"{k}: {v}")
+
+    return out
