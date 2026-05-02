@@ -58,8 +58,10 @@ def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
 
         data, pos = read_binary_spec(vb, uint2_spec, pos)
         num_control_points = data[0]
+        # data[1] is header_id (8321 or 33); see clip_tools/unknowns.md.
 
-        # bbox (top_left, bottom_right) — read but unused for rendering.
+        # 4× u32 stroke bbox (left, top, right, bottom) — read but unused
+        # for rendering.
         pos += 16
 
         data, pos = read_binary_spec(vb, color3_spec, pos)

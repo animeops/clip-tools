@@ -111,8 +111,7 @@ def parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
     return out, pos
 
 
-# TLV tag IDs. Tags labelled
-# "unknown" are unidentified there too.
+# TLV tag IDs.
 TLV_PARAGRAPH_ALIGN = 12  # paragraph-run array (start, length, align byte)
 TLV_PARAGRAPH_UNK_18 = 18  # same shape as 12/16/20; specific property unknown
 TLV_PARAGRAPH_UNDERLINE = 16

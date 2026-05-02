@@ -38,8 +38,8 @@ class ClipImage(ClipLayer):
         )
         brush_style = dfs.get("BrushStyle")
 
-        clip_data, _num_skipped_chunks = process_chunk_binary(
-            clip_binary, canvas_size, external_id_map, brush_style
+        clip_data, _num_skipped_chunks, _file_header, _block_metadata = (
+            process_chunk_binary(clip_binary, canvas_size, external_id_map, brush_style)
         )
 
         for key, value in external_id_map.items():
