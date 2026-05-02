@@ -8,7 +8,8 @@ from PIL import Image
 
 import logging
 
-from clip_tools.constants import DEBUG, LayerFolderBit
+from clip_tools.blending import composite_layer
+from clip_tools.constants import DEBUG, LayerComposite, LayerFolderBit
 from clip_tools.structs import (
     process_text_attributes,
     process_resizable_image_attributes,
@@ -260,6 +261,23 @@ class ClipLayer:
         layer_list is a list of tuples (id, image)
         """
 
+        def layer_composite(metadata) -> LayerComposite:
+            raw = metadata.get("LayerComposite", 0)
+            try:
+                return LayerComposite(int(raw))
+            except (ValueError, TypeError):
+                return LayerComposite.NORMAL
+
+        def unpremultiply_rgba(arr: np.ndarray) -> np.ndarray:
+            if arr.shape[-1] < 4:
+                return arr
+            a = arr[..., 3:4].astype(np.float32) / 255.0
+            safe_a = np.where(a == 0, 1.0, a)
+            rgb = np.clip(arr[..., :3].astype(np.float32) / safe_a, 0, 255)
+            out = arr.copy()
+            out[..., :3] = np.where(a > 0, rgb, 0).round().astype(np.uint8)
+            return out
+
         buffer = np.zeros((*self._canvas_size, 4), dtype=np.uint8)
 
         buffer[..., :3] = 255
@@ -300,7 +318,11 @@ class ClipLayer:
                 layer_buffer = backward_mapping(
                     transform, layer_img, layer_buffer, polygon_coords
                 )
-                buffer = alpha_blend(buffer, layer_buffer, premultiplied=False)
+                mode = layer_composite(layer_metadata)
+                if mode == LayerComposite.NORMAL:
+                    buffer = alpha_blend(buffer, layer_buffer, premultiplied=False)
+                else:
+                    buffer = composite_layer(buffer, layer_buffer, mode)
 
             else:
                 if layer_img is None:
@@ -339,19 +361,24 @@ class ClipLayer:
                     layer_width = buffer.shape[1]
                     layer_img = layer_img[:, :layer_width]
 
-                # Alpha blend
                 premultiplied = layer_type == "vector"
-
+                mode = layer_composite(layer_metadata)
+                base_slice = buffer[
+                    layer_offset_y : layer_offset_y + layer_height,
+                    layer_offset_x : layer_offset_x + layer_width,
+                ]
+                if mode == LayerComposite.NORMAL:
+                    composited = alpha_blend(
+                        base_slice, layer_img, premultiplied=premultiplied
+                    )
+                else:
+                    blend_input = (
+                        unpremultiply_rgba(layer_img) if premultiplied else layer_img
+                    )
+                    composited = composite_layer(base_slice, blend_input, mode)
                 buffer[
                     layer_offset_y : layer_offset_y + layer_height,
                     layer_offset_x : layer_offset_x + layer_width,
-                ] = alpha_blend(
-                    buffer[
-                        layer_offset_y : layer_offset_y + layer_height,
-                        layer_offset_x : layer_offset_x + layer_width,
-                    ],
-                    layer_img,
-                    premultiplied=premultiplied,
-                )
+                ] = composited
 
         return buffer
