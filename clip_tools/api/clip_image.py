@@ -11,6 +11,7 @@ from clip_tools.processing import (
     process_clip_data,
     rasterize_vectors,
 )
+from clip_tools.sqlite_records import CanvasRecord
 from clip_tools.structs import process_chunk_binary
 
 logger = logging.getLogger(__name__)
@@ -32,10 +33,8 @@ class ClipImage(ClipLayer):
             dump_dfs_csv(dfs, base_name)
 
         external_id_map = build_external_id_map(dfs)
-        canvas_size = (
-            int(dfs["Canvas"]["CanvasHeight"].iloc[0]),
-            int(dfs["Canvas"]["CanvasWidth"].iloc[0]),
-        )
+        canvas = CanvasRecord.from_row(dfs["Canvas"].iloc[0])
+        canvas_size = (int(canvas.canvas_height), int(canvas.canvas_width))
         brush_style = dfs.get("BrushStyle")
 
         clip_data, _num_skipped_chunks, _file_header, _block_metadata = (
