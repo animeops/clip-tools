@@ -6,7 +6,7 @@ import pandas as pd
 import logging
 
 from clip_tools.utils import read_binary_spec
-from clip_tools.constants import DEBUG
+from clip_tools.constants import DEBUG, BlockMarker, ChunkMagic
 from clip_tools.types import ExternalIdEntry
 from clip_tools.structs.binc import BincDocument, is_binc, parse_binc
 
@@ -60,15 +60,6 @@ def process_chunk_binary(
         block_metadata: external_id → {"statuses": [int], "checksums": [int]}
             for raster chunks that ship their per-block status/checksum arrays.
     """
-    CHUNK_HEADER = b"CHNKHead"
-    CHUNK_EXTERNAL = b"CHNKExta"
-    CHUNK_SQLITE = b"CHNKSQLi"
-
-    BLOCK_DATA_BEGIN_CHUNK = "BlockDataBeginChunk".encode("utf-16be")
-    BLOCK_DATA_END_CHUNK = "BlockDataEndChunk".encode("utf-16be")
-    BLOCK_STATUS = "BlockStatus".encode("utf-16be")
-    BLOCK_CHECK_SUM = "BlockCheckSum".encode("utf-16be")
-
     clip_header_spec = struct.Struct(">8sQQ")
     chunk_header_spec = struct.Struct(">8sQ")
     external_header_spec = struct.Struct(">Q40sQ")
@@ -93,12 +84,12 @@ def process_chunk_binary(
         data, pos = read_binary_spec(clip_binary_str, chunk_header_spec, pos)
         chunk_type, chunk_length = data
 
-        if chunk_type == CHUNK_HEADER:
+        if chunk_type == ChunkMagic.HEADER:
             file_header = parse_chnk_head_body(
                 clip_binary_str[pos : pos + chunk_length]
             )
             pos += chunk_length
-        elif chunk_type == CHUNK_EXTERNAL:
+        elif chunk_type == ChunkMagic.EXTERNAL:
             data, pos = read_binary_spec(clip_binary_str, external_header_spec, pos)
 
             _, external_id, data_size = data
@@ -161,7 +152,9 @@ def process_chunk_binary(
 
                 if (
                     data[1]
-                    == uint_spec.unpack(BLOCK_DATA_BEGIN_CHUNK[: uint_spec.size])[0]
+                    == uint_spec.unpack(BlockMarker.BLOCK_DATA_BEGIN[: uint_spec.size])[
+                        0
+                    ]
                 ):
                     str_length = data[0]
                     chunk_pos -= uint_spec.size
@@ -172,7 +165,7 @@ def process_chunk_binary(
                 bd_id = data_binary_str[chunk_pos : chunk_pos + (str_length * 2)]
                 chunk_pos += str_length * 2
 
-                if bd_id == BLOCK_DATA_BEGIN_CHUNK:
+                if bd_id == BlockMarker.BLOCK_DATA_BEGIN:
                     data, chunk_pos = read_binary_spec(
                         data_binary_str, block_header_spec, chunk_pos
                     )
@@ -192,9 +185,12 @@ def process_chunk_binary(
 
                         chunk_pos += data_length
 
-                elif bd_id == BLOCK_DATA_END_CHUNK:
+                elif bd_id == BlockMarker.BLOCK_DATA_END:
                     pass
-                elif bd_id == BLOCK_STATUS or bd_id == BLOCK_CHECK_SUM:
+                elif (
+                    bd_id == BlockMarker.BLOCK_STATUS
+                    or bd_id == BlockMarker.BLOCK_CHECK_SUM
+                ):
                     # Layout:
                     #   u32 v12      (=12)
                     #   u32 count    (= number of blocks)
@@ -207,7 +203,9 @@ def process_chunk_binary(
                     chunk_pos += 4  # skip _width field
                     entries_bytes = data_binary_str[chunk_pos : chunk_pos + count * 4]
                     entries = list(struct.unpack(f">{count}I", entries_bytes))
-                    key = "statuses" if bd_id == BLOCK_STATUS else "checksums"
+                    key = (
+                        "statuses" if bd_id == BlockMarker.BLOCK_STATUS else "checksums"
+                    )
                     block_metadata.setdefault(external_id_str, {})[key] = entries
                     chunk_pos += count * 4
                 else:
@@ -219,7 +217,7 @@ def process_chunk_binary(
 
             pos += data_size
 
-        elif chunk_type == CHUNK_SQLITE:
+        elif chunk_type == ChunkMagic.SQLITE:
             break
         else:
             raise Exception("Invalid chunk type")
