@@ -8,6 +8,7 @@ import logging
 from clip_tools.utils import read_binary_spec
 from clip_tools.constants import DEBUG
 from clip_tools.types import ExternalIdEntry
+from clip_tools.structs.binc import BincDocument, is_binc, parse_binc
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def process_chunk_binary(
     external_id_map: Dict[str, ExternalIdEntry],
     brush_styles: pd.DataFrame,
 ) -> Tuple[
-    Dict[str, Union[Dict[int, bytes], bytes]],
+    Dict[str, Union[Dict[int, bytes], bytes, BincDocument]],
     Dict[str, int],
     Dict[str, Any],
     Dict[str, Dict[str, List[int]]],
@@ -50,8 +51,10 @@ def process_chunk_binary(
     """Parse the chunk-stream binary region.
 
     Returns:
-        chunk_dict: external_id → either {block_idx: decompressed_bytes}
-            (raster blocks) or raw bytes (vector blobs).
+        chunk_dict: external_id → one of:
+            - {block_idx: decompressed_bytes}      (raster Offscreen.BlockData)
+            - bytes                                 (vector blobs, kept raw)
+            - BincDocument                          (Track/3D/timelapse, decoded)
         num_skipped_dict: external_id → count of unrecognized sub-chunks.
         file_header: decoded CHNKHead body (version, identifier, etc.).
         block_metadata: external_id → {"statuses": [int], "checksums": [int]}
@@ -118,6 +121,29 @@ def process_chunk_binary(
             logger.debug(
                 f"Processing external ID #{num_external_ids} with ID {external_id_str}..."
             )
+
+            # Track / 3D model / timelapse externals are stored flat as
+            # `[u32 LE size][zlib payload]`, not as BlockData chunks.
+            # The decompressed payload is a Celsys binc document.
+            if data_size >= 8:
+                payload_size_le = struct.unpack_from("<I", data_binary_str, 0)[0]
+                if payload_size_le == data_size - 4 and data_binary_str[4:6] in (
+                    b"\x78\x01",
+                    b"\x78\x9c",
+                    b"\x78\xda",
+                ):
+                    try:
+                        decompressed = zlib.decompress(data_binary_str[4:data_size])
+                    except zlib.error:
+                        decompressed = b""
+                    if decompressed and is_binc(decompressed):
+                        chunk_dict[external_id_str] = parse_binc(decompressed)
+                    elif decompressed:
+                        chunk_dict[external_id_str] = decompressed
+                    else:
+                        chunk_dict[external_id_str] = bytes(data_binary_str[:data_size])
+                    pos += data_size
+                    continue
 
             chunk_pos = 0
             while chunk_pos < data_size:

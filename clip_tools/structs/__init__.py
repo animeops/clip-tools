@@ -1,3 +1,4 @@
+from .binc import BincDocument, BincNode, find_child, is_binc, parse_binc
 from .chunk import process_chunk_binary
 from .resizable_image_attributes import process_resizable_image_attributes
 from .offscreen_attributes import process_offscreen_attributes
@@ -6,6 +7,11 @@ from .text_attributes import process_text_attributes
 from .vector import parse_vector_binary, rasterize_polylines
 
 __all__ = [
+    "BincDocument",
+    "BincNode",
+    "find_child",
+    "is_binc",
+    "parse_binc",
     "process_chunk_binary",
     "process_resizable_image_attributes",
     "process_offscreen_attributes",
