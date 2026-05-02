@@ -84,6 +84,7 @@ class LayerKind(enum.IntEnum):
     OTHER_MASKED = 2
     RASTER_MASKED = 3
     DUMMY = 256  # root folder
+    CAMERA_2D = 512  # 2D camera frame (no pixels; carries Camera2D* columns)
     PAPER = 1584  # paper layer (one per canvas)
     FILTER = 4096  # adjustment / filter layer
     FILTER_MASKED = 4098
@@ -123,6 +124,7 @@ class LayerLockBit(enum.IntFlag):
 class LayerFolderBit(enum.IntFlag):
     """Bit flags packed into the `Layer.LayerFolder` u32 column."""
 
+    IS_FOLDER = 1 << 0  # this row is a folder, not a leaf layer
     CLOSED = 1 << 4  # folder is collapsed in the UI
 
 

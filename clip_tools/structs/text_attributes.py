@@ -1,5 +1,13 @@
+"""Parser for the per-layer `TextLayerAttributes` (and
+`TextLayerAddAttributesV01`) blobs.
+
+The blob is style metadata only — the actual text content lives in the
+sibling `TextLayerString` column (UTF-8).
+"""
+
 import struct
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from clip_tools.constants import (
     DEBUG,
@@ -9,7 +17,111 @@ from clip_tools.constants import (
 from clip_tools.utils import read_binary_spec
 
 
-def parse_font_style_block(blob: bytes, pos: int) -> Dict[str, Any]:
+@dataclass
+class FontStyleBlock:
+    num_chars_in_style: int
+    num_bytes: int
+    styling: Union[TextStylingType, int]
+    window: Union[TextWindowType, int]
+    color: Tuple[int, int, int]
+    color_padding: bytes
+    style_flag: int
+    font_name_length: int
+    font_name: str
+    tail_field: int
+    unconsumed: Optional[bytes] = None
+
+
+@dataclass
+class TextChunkBlock:
+    num_chars_in_chunk: int
+    marker: int
+    text_box_scale_x: float
+    text_box_scale_y: float
+    separator: Optional[int] = None  # only on non-last chunks
+
+
+@dataclass
+class TLVRecord:
+    tag: int
+    value: bytes
+
+
+@dataclass
+class ParagraphRun:
+    start: int
+    length: int
+    unk1: int
+    value: int
+    unk2: int
+
+
+@dataclass
+class FontAlias:
+    display_name: str
+    postscript_name: str
+
+
+@dataclass
+class FontAliases:
+    font_list: List[FontAlias]
+    trailer: Optional[int]
+
+
+@dataclass
+class SecondaryFont:
+    flag: int
+    marker_a: int
+    marker_b: int
+    font_name: str
+    empty: bool = False
+    raw: Optional[bytes] = None
+    unexpected_markers: bool = False
+
+
+@dataclass
+class TextAttributes:
+    """Decoded `TextLayerAttributes` (or `TextLayerAddAttributesV01`) blob."""
+
+    header: int
+    font_styles_section_length: int
+    num_font_styles: int
+    mystery_a: int
+    font_styles: List[FontStyleBlock]
+    chunks_section_length: int
+    num_chunks: int
+    mystery_a_mirror: int
+    chunks: List[TextChunkBlock]
+    tlv_records: List[TLVRecord]
+
+    # Decoded named TLV fields (Optional — only set when the tag is present
+    # and its payload has the expected length).
+    default_font_name: Optional[str] = None
+    font_size: Optional[int] = None
+    unit: Optional[int] = None
+    outline_color: Optional[Tuple[float, float, float]] = None
+    text_bbox: Optional[Tuple[int, int, int, int]] = None
+    general_offset_x: Optional[int] = None
+    general_offset_y: Optional[int] = None
+    aspect_ratio: Optional[float] = None
+    secondary_font: Optional[SecondaryFont] = None
+    font_aliases: Optional[FontAliases] = None
+    skew_angle_1: Optional[int] = None
+    skew_angle_2: Optional[int] = None
+    box_size: Optional[Tuple[int, int]] = None
+    quad_verts: Optional[Tuple[float, ...]] = None
+    paragraph_align: Optional[List[ParagraphRun]] = None
+    paragraph_underline: Optional[List[ParagraphRun]] = None
+    paragraph_strike: Optional[List[ParagraphRun]] = None
+    paragraph_unk_18: Optional[List[ParagraphRun]] = None
+
+    font_styles_section_unconsumed: Optional[bytes] = None
+    chunks_section_unconsumed: Optional[bytes] = None
+    undecoded_tail: bytes = b""
+    undecoded_tail_offset: int = 0
+
+
+def parse_font_style_block(blob: bytes, pos: int) -> Tuple[FontStyleBlock, int]:
     """Parse one font-style record.
 
     Layout::
@@ -22,65 +134,78 @@ def parse_font_style_block(blob: bytes, pos: int) -> Dict[str, Any]:
             u16 [LE] color_r   # full 16-bit value; 8-bit channel = (v >> 8) & 0xFF
             u16 [LE] color_g
             u16 [LE] color_b
-            byte[6]  color_padding   # observed all zero (alpha + reserved?)
+            byte[6]  color_padding
             u16 [LE] style_flag      # 0x4059 if any styling present, 0 otherwise
-            u16 [LE] font_name_length    # in UTF-16 LE chars
+            u16 [LE] font_name_length
             byte[font_name_length*2] font_name (UTF-16 LE)
-            u32 [LE] tail_field      # unknown — not the same as num_bytes
+            u32 [LE] tail_field
     """
     uint_le = struct.Struct("<I")
     u16_le = struct.Struct("<HHH")
     byte2 = struct.Struct("<BB")
     u16_pair_le = struct.Struct("<HH")
 
-    out: Dict[str, Any] = {}
-
-    out["num_chars_in_style"] = uint_le.unpack_from(blob, pos)[0]
+    num_chars_in_style = uint_le.unpack_from(blob, pos)[0]
     pos += 4
     num_bytes = uint_le.unpack_from(blob, pos)[0]
     pos += 4
-    out["num_bytes"] = num_bytes
-    styling, window = byte2.unpack_from(blob, pos)
+    styling_raw, window_raw = byte2.unpack_from(blob, pos)
     pos += 2
     try:
-        out["styling"] = TextStylingType(styling)
+        styling: Union[TextStylingType, int] = TextStylingType(styling_raw)
     except ValueError:
-        out["styling"] = styling
+        styling = styling_raw
     try:
-        out["window"] = TextWindowType(window)
+        window: Union[TextWindowType, int] = TextWindowType(window_raw)
     except ValueError:
-        out["window"] = window
+        window = window_raw
 
     body_end = pos + (num_bytes - 6)
 
     r, g, b = u16_le.unpack_from(blob, pos)
     pos += 6
-    out["color"] = ((r >> 8) & 0xFF, (g >> 8) & 0xFF, (b >> 8) & 0xFF)
-    out["_color_padding"] = blob[pos : pos + 6]
+    color = ((r >> 8) & 0xFF, (g >> 8) & 0xFF, (b >> 8) & 0xFF)
+    color_padding = bytes(blob[pos : pos + 6])
     pos += 6
 
     style_flag, name_len = u16_pair_le.unpack_from(blob, pos)
     pos += 4
-    out["style_flag"] = style_flag
-    out["font_name_length"] = name_len
 
     if name_len > 0:
-        out["font_name"] = blob[pos : pos + name_len * 2].decode("utf-16-le")
+        font_name = blob[pos : pos + name_len * 2].decode("utf-16-le")
         pos += name_len * 2
     else:
-        out["font_name"] = ""
+        font_name = ""
 
-    out["tail_field"] = uint_le.unpack_from(blob, pos)[0]
+    tail_field = uint_le.unpack_from(blob, pos)[0]
     pos += 4
 
+    unconsumed: Optional[bytes] = None
     if pos != body_end:
-        out["_unconsumed"] = blob[pos:body_end]
+        unconsumed = bytes(blob[pos:body_end])
         pos = body_end
 
-    return out, pos
+    return (
+        FontStyleBlock(
+            num_chars_in_style=num_chars_in_style,
+            num_bytes=num_bytes,
+            styling=styling,
+            window=window,
+            color=color,
+            color_padding=color_padding,
+            style_flag=style_flag,
+            font_name_length=name_len,
+            font_name=font_name,
+            tail_field=tail_field,
+            unconsumed=unconsumed,
+        ),
+        pos,
+    )
 
 
-def parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
+def parse_chunk_block(
+    blob: bytes, pos: int, is_last: bool
+) -> Tuple[TextChunkBlock, int]:
     """Parse one chunk record.
 
     A "chunk" mirrors a font-style range — there is one chunk per font_style
@@ -89,26 +214,33 @@ def parse_chunk_block(blob: bytes, pos: int, is_last: bool) -> Dict[str, Any]:
     Layout (28 bytes for non-last chunks, 24 for the last)::
 
         u32  num_chars_in_chunk  # equals the matching font_style.num_chars_in_style
-        u32  marker              # observed always 16 — a record-type code?
+        u32  marker              # observed always 16 — record-type code?
         f64  text_box_scale_x    # percent
         f64  text_box_scale_y    # percent
         u32  separator           # only on non-last chunks; observed always 2
     """
     uint_le = struct.Struct("<I")
     d2 = struct.Struct("<dd")
-    out: Dict[str, Any] = {}
-    out["num_chars_in_chunk"] = uint_le.unpack_from(blob, pos)[0]
+    num_chars = uint_le.unpack_from(blob, pos)[0]
     pos += 4
-    out["marker"] = uint_le.unpack_from(blob, pos)[0]
+    marker = uint_le.unpack_from(blob, pos)[0]
     pos += 4
     sx, sy = d2.unpack_from(blob, pos)
     pos += 16
-    out["text_box_scale_x"] = sx
-    out["text_box_scale_y"] = sy
+    sep: Optional[int] = None
     if not is_last:
-        out["separator"] = uint_le.unpack_from(blob, pos)[0]
+        sep = uint_le.unpack_from(blob, pos)[0]
         pos += 4
-    return out, pos
+    return (
+        TextChunkBlock(
+            num_chars_in_chunk=num_chars,
+            marker=marker,
+            text_box_scale_x=sx,
+            text_box_scale_y=sy,
+            separator=sep,
+        ),
+        pos,
+    )
 
 
 # TLV tag IDs.
@@ -130,10 +262,10 @@ TLV_BOX_SIZE = 63  # 2× i32
 TLV_QUAD_VERTS = 64  # 8× i32, divided by 100 → 4 (x, y) corners
 
 
-def parse_tlv_records(blob: bytes, start: int, end: int) -> List[Dict[str, Any]]:
+def parse_tlv_records(blob: bytes, start: int, end: int) -> List[TLVRecord]:
     """Walk a tag-length-value stream. Each record is `u32 tag + u32 length
-    + length bytes value`. Returns a list of {"tag", "value"} dicts."""
-    records: List[Dict[str, Any]] = []
+    + length bytes value`."""
+    records: List[TLVRecord] = []
     uint_le = struct.Struct("<I")
     pos = start
     while pos + 8 <= end:
@@ -143,12 +275,12 @@ def parse_tlv_records(blob: bytes, start: int, end: int) -> List[Dict[str, Any]]
         pos += 4
         if pos + length > end:
             break
-        records.append({"tag": tag, "value": blob[pos : pos + length]})
+        records.append(TLVRecord(tag=tag, value=bytes(blob[pos : pos + length])))
         pos += length
     return records
 
 
-def parse_paragraph_runs(val: bytes) -> List[Dict[str, Any]]:
+def parse_paragraph_runs(val: bytes) -> List[ParagraphRun]:
     """Decode a paragraph-runs TLV value (tags 12, 16, 18, 20).
 
     Layout::
@@ -158,16 +290,15 @@ def parse_paragraph_runs(val: bytes) -> List[Dict[str, Any]]:
             i32  start
             i32  length
             i32  unk1
-            i8   value     # the actual property (alignment for tag 12, etc.)
+            i8   value
             i8   unk2
 
-    A zero-length value (no leading count) means "no runs / feature off" —
-    seen on tags 16 and 20 in our current samples.
+    A zero-length value (no leading count) means "no runs / feature off".
     """
     if len(val) < 4:
         return []
     n = struct.unpack_from("<i", val, 0)[0]
-    out = []
+    out: List[ParagraphRun] = []
     pos = 4
     for _ in range(n):
         if pos + 14 > len(val):
@@ -178,19 +309,13 @@ def parse_paragraph_runs(val: bytes) -> List[Dict[str, Any]]:
         value = struct.unpack_from("<b", val, pos + 12)[0]
         unk2 = struct.unpack_from("<b", val, pos + 13)[0]
         out.append(
-            {
-                "start": start,
-                "length": length,
-                "unk1": unk1,
-                "value": value,
-                "unk2": unk2,
-            }
+            ParagraphRun(start=start, length=length, unk1=unk1, value=value, unk2=unk2)
         )
         pos += 14
     return out
 
 
-def parse_font_aliases(val: bytes) -> Dict[str, Any]:
+def parse_font_aliases(val: bytes) -> FontAliases:
     """Decode TLV tag 57: a list of (display_name, postscript_name) pairs.
 
     Layout::
@@ -204,10 +329,10 @@ def parse_font_aliases(val: bytes) -> Dict[str, Any]:
         i32              trailer (observed 0x00000708 = 1800)
     """
     if len(val) < 2:
-        return {"font_list": [], "trailer": 0}
+        return FontAliases(font_list=[], trailer=0)
     n = struct.unpack_from("<h", val, 0)[0]
     pos = 2
-    font_list = []
+    font_list: List[FontAlias] = []
     for _ in range(n):
         if pos + 2 > len(val):
             break
@@ -221,55 +346,52 @@ def parse_font_aliases(val: bytes) -> Dict[str, Any]:
         pos += 2
         ps = val[pos : pos + n2].decode("utf-8", errors="replace")
         pos += n2
-        font_list.append({"display_name": display, "postscript_name": ps})
+        font_list.append(FontAlias(display_name=display, postscript_name=ps))
     trailer = struct.unpack_from("<i", val, pos)[0] if pos + 4 <= len(val) else None
-    return {"font_list": font_list, "trailer": trailer}
+    return FontAliases(font_list=font_list, trailer=trailer)
 
 
-def parse_secondary_font(val: bytes) -> Dict[str, Any]:
+def parse_secondary_font(val: bytes) -> SecondaryFont:
     """Decode TLV tag 47: a secondary font reference with a structured prefix.
 
     Layout::
 
-        i16              flag      (varies; 0 when empty, non-zero otherwise)
+        i16              flag
         i32              marker_a  (always 50)
         i32              marker_b  (always 0)
         i16              name_length
         byte[*]          font_name (UTF-8)
     """
     if len(val) < 12:
-        return {"empty": True, "raw": val}
+        return SecondaryFont(
+            flag=0, marker_a=0, marker_b=0, font_name="", empty=True, raw=bytes(val)
+        )
     flag = struct.unpack_from("<h", val, 0)[0]
     marker_a = struct.unpack_from("<i", val, 2)[0]
     marker_b = struct.unpack_from("<i", val, 6)[0]
     name_len = struct.unpack_from("<h", val, 10)[0]
     name = val[12 : 12 + name_len].decode("utf-8", errors="replace") if name_len else ""
-    out = {
-        "flag": flag,
-        "marker_a": marker_a,
-        "marker_b": marker_b,
-        "font_name": name,
-    }
-    if marker_a != 50 or marker_b != 0:
-        out["unexpected_markers"] = True
-    return out
+    return SecondaryFont(
+        flag=flag,
+        marker_a=marker_a,
+        marker_b=marker_b,
+        font_name=name,
+        unexpected_markers=(marker_a != 50 or marker_b != 0),
+    )
 
 
-def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
+def process_text_attributes(attributes: bytes) -> TextAttributes:
     """Decode the per-layer ``TextLayerAttributes`` blob.
-
-    The blob is style metadata only; the actual text content lives in the
-    sibling ``TextLayerString`` column (UTF-8).
 
     Top-level layout::
 
         u32 header (=11)
-        u32 font_styles_section_length     # bytes from after num_font_styles
+        u32 font_styles_section_length
         u32 num_font_styles
-        u32 mystery_a                      # observed values 0/3/16
+        u32 mystery_a
         FontStyleBlock × num_font_styles
 
-        u32 chunks_section_length          # bytes from after this field
+        u32 chunks_section_length
         u32 num_chunks
         u32 mystery_a (mirror)
         ChunkBlock × num_chunks
@@ -277,147 +399,145 @@ def process_text_attributes(attributes: bytes) -> Dict[str, Any]:
         TLV stream (until end of blob):
             u32 tag, u32 length, byte[length] value
 
-    Known TLV tags:
+    Known TLV tags (decoded into named fields on the result):
 
-    - 12  paragraph_align             (paragraph runs)
-    - 16  paragraph_underline         (paragraph runs)
-    - 18  paragraph_unk_18            (paragraph runs; specific property unknown)
-    - 20  paragraph_strike            (paragraph runs)
-    - 26  aspect_ratio                (f64 at offset 16 of the value)
-    - 31  default_font_name           (UTF-8)
-    - 32  font_size                   (i32 in 1/100 pt)
-    - 33  unit                        (i32; expected 1)
-    - 34  outline_color               (3× i32 normalized to [0, 1])
-    - 42  text_bbox                   (4× i32: x0, y0, x1, y1) — origin doubles
-                                       as the layer's general offset
-    - 47  secondary_font              (font reference with prefix flags)
-    - 57  font_aliases                (list of (display, PostScript) pairs)
-    - 59  skew_angle_1
-    - 60  skew_angle_2
-    - 63  box_size                    (2× i32)
-    - 64  quad_verts                  (8× i32 / 100 → 4 (x, y) corners)
+    - 12 paragraph_align, 16 paragraph_underline, 18 paragraph_unk_18,
+      20 paragraph_strike — paragraph runs
+    - 26 aspect_ratio                 (f64 at offset 16 of the value)
+    - 31 default_font_name            (UTF-8)
+    - 32 font_size                    (i32 in 1/100 pt)
+    - 33 unit                         (i32; expected 1)
+    - 34 outline_color                (3× i32 normalized to [0, 1])
+    - 42 text_bbox + general_offset_x/y
+    - 47 secondary_font, 57 font_aliases
+    - 59 skew_angle_1, 60 skew_angle_2
+    - 63 box_size, 64 quad_verts
 
     Other tags are exposed as raw bytes via ``tlv_records``; see
     ``unknowns.md`` for the still-unidentified set.
     """
     uint_le = struct.Struct("<I")
 
-    out: Dict[str, Any] = {}
     pos = 0
-
     header = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
     if header != 11:
         raise ValueError(f"Invalid text attributes header: expected 11, got {header}")
-    out["header"] = header
 
     fs_section_len = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
-    out["font_styles_section_length"] = fs_section_len
-
-    # The font-styles length field measures bytes starting from *after*
-    # num_font_styles (mystery_a + the per-style records). Read
-    # num_font_styles first so we can anchor the section end correctly.
-    out["num_font_styles"] = uint_le.unpack_from(attributes, pos)[0]
+    num_font_styles = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
     fs_section_end = pos + fs_section_len
-    out["mystery_a"] = uint_le.unpack_from(attributes, pos)[0]
+    mystery_a = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
 
-    out["font_styles"] = []
-    for _ in range(out["num_font_styles"]):
+    font_styles: List[FontStyleBlock] = []
+    for _ in range(num_font_styles):
         fs, pos = parse_font_style_block(attributes, pos)
-        out["font_styles"].append(fs)
+        font_styles.append(fs)
 
+    fs_unconsumed: Optional[bytes] = None
     if pos != fs_section_end:
-        out["_font_styles_section_unconsumed"] = attributes[pos:fs_section_end]
+        fs_unconsumed = bytes(attributes[pos:fs_section_end])
         pos = fs_section_end
 
     chunks_section_len = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
-    out["chunks_section_length"] = chunks_section_len
     chunks_section_end = pos + chunks_section_len
-
-    out["num_chunks"] = uint_le.unpack_from(attributes, pos)[0]
+    num_chunks = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
-    out["mystery_a_mirror"] = uint_le.unpack_from(attributes, pos)[0]
+    mystery_a_mirror = uint_le.unpack_from(attributes, pos)[0]
     pos += 4
 
-    out["chunks"] = []
-    for i in range(out["num_chunks"]):
-        ck, pos = parse_chunk_block(
-            attributes, pos, is_last=(i == out["num_chunks"] - 1)
-        )
-        out["chunks"].append(ck)
+    chunks: List[TextChunkBlock] = []
+    for i in range(num_chunks):
+        ck, pos = parse_chunk_block(attributes, pos, is_last=(i == num_chunks - 1))
+        chunks.append(ck)
 
+    chunks_unconsumed: Optional[bytes] = None
     if pos != chunks_section_end:
-        out["_chunks_section_unconsumed"] = attributes[pos:chunks_section_end]
+        chunks_unconsumed = bytes(attributes[pos:chunks_section_end])
         pos = chunks_section_end
 
-    # Everything after the chunks section is a flat TLV stream.
     tlv_records = parse_tlv_records(attributes, pos, len(attributes))
-    out["tlv_records"] = tlv_records
 
-    # Surface known tags as named fields for ergonomic access.
-    by_tag: Dict[int, bytes] = {r["tag"]: r["value"] for r in tlv_records}
+    out = TextAttributes(
+        header=header,
+        font_styles_section_length=fs_section_len,
+        num_font_styles=num_font_styles,
+        mystery_a=mystery_a,
+        font_styles=font_styles,
+        chunks_section_length=chunks_section_len,
+        num_chunks=num_chunks,
+        mystery_a_mirror=mystery_a_mirror,
+        chunks=chunks,
+        tlv_records=tlv_records,
+        font_styles_section_unconsumed=fs_unconsumed,
+        chunks_section_unconsumed=chunks_unconsumed,
+    )
+
+    by_tag: Dict[int, bytes] = {r.tag: r.value for r in tlv_records}
 
     if TLV_DEFAULT_FONT in by_tag:
         try:
-            out["default_font_name"] = by_tag[TLV_DEFAULT_FONT].decode("utf-8")
+            out.default_font_name = by_tag[TLV_DEFAULT_FONT].decode("utf-8")
         except UnicodeDecodeError:
-            out["default_font_name"] = ""
+            out.default_font_name = ""
     if TLV_FONT_SIZE in by_tag and len(by_tag[TLV_FONT_SIZE]) == 4:
-        out["font_size"] = struct.unpack_from("<i", by_tag[TLV_FONT_SIZE], 0)[0]
+        out.font_size = struct.unpack_from("<i", by_tag[TLV_FONT_SIZE], 0)[0]
     if TLV_UNIT in by_tag and len(by_tag[TLV_UNIT]) == 4:
-        out["unit"] = struct.unpack_from("<i", by_tag[TLV_UNIT], 0)[0]
+        out.unit = struct.unpack_from("<i", by_tag[TLV_UNIT], 0)[0]
     if TLV_OUTLINE_COLOR in by_tag and len(by_tag[TLV_OUTLINE_COLOR]) == 12:
         chans = struct.unpack_from("<iii", by_tag[TLV_OUTLINE_COLOR], 0)
-        out["outline_color"] = tuple(c / (2**32 - 1) for c in chans)
+        out.outline_color = tuple(c / (2**32 - 1) for c in chans)
     if TLV_TEXT_BBOX in by_tag and len(by_tag[TLV_TEXT_BBOX]) == 16:
-        out["text_bbox"] = struct.unpack_from("<iiii", by_tag[TLV_TEXT_BBOX], 0)
-        out["general_offset_x"] = out["text_bbox"][0]
-        out["general_offset_y"] = out["text_bbox"][1]
+        out.text_bbox = struct.unpack_from("<iiii", by_tag[TLV_TEXT_BBOX], 0)
+        out.general_offset_x = out.text_bbox[0]
+        out.general_offset_y = out.text_bbox[1]
     if TLV_ASPECT_RATIO in by_tag and len(by_tag[TLV_ASPECT_RATIO]) >= 32:
-        out["aspect_ratio"] = struct.unpack_from("<d", by_tag[TLV_ASPECT_RATIO], 16)[0]
+        out.aspect_ratio = struct.unpack_from("<d", by_tag[TLV_ASPECT_RATIO], 16)[0]
     if TLV_SECONDARY_FONT in by_tag:
-        out["secondary_font"] = parse_secondary_font(by_tag[TLV_SECONDARY_FONT])
+        out.secondary_font = parse_secondary_font(by_tag[TLV_SECONDARY_FONT])
     if TLV_FONT_ALIASES in by_tag:
-        out["font_aliases"] = parse_font_aliases(by_tag[TLV_FONT_ALIASES])
+        out.font_aliases = parse_font_aliases(by_tag[TLV_FONT_ALIASES])
     if TLV_SKEW_ANGLE_1 in by_tag and len(by_tag[TLV_SKEW_ANGLE_1]) == 4:
-        out["skew_angle_1"] = struct.unpack_from("<i", by_tag[TLV_SKEW_ANGLE_1], 0)[0]
+        out.skew_angle_1 = struct.unpack_from("<i", by_tag[TLV_SKEW_ANGLE_1], 0)[0]
     if TLV_SKEW_ANGLE_2 in by_tag and len(by_tag[TLV_SKEW_ANGLE_2]) == 4:
-        out["skew_angle_2"] = struct.unpack_from("<i", by_tag[TLV_SKEW_ANGLE_2], 0)[0]
+        out.skew_angle_2 = struct.unpack_from("<i", by_tag[TLV_SKEW_ANGLE_2], 0)[0]
     if TLV_BOX_SIZE in by_tag and len(by_tag[TLV_BOX_SIZE]) == 8:
-        out["box_size"] = struct.unpack_from("<ii", by_tag[TLV_BOX_SIZE], 0)
+        out.box_size = struct.unpack_from("<ii", by_tag[TLV_BOX_SIZE], 0)
     if TLV_QUAD_VERTS in by_tag and len(by_tag[TLV_QUAD_VERTS]) == 32:
         verts = struct.unpack_from("<8i", by_tag[TLV_QUAD_VERTS], 0)
-        out["quad_verts"] = tuple(v / 100 for v in verts)
-    for tag, key in (
-        (TLV_PARAGRAPH_ALIGN, "paragraph_align"),
-        (TLV_PARAGRAPH_UNDERLINE, "paragraph_underline"),
-        (TLV_PARAGRAPH_STRIKE, "paragraph_strike"),
-        (TLV_PARAGRAPH_UNK_18, "paragraph_unk_18"),
-    ):
-        if tag in by_tag:
-            out[key] = parse_paragraph_runs(by_tag[tag])
+        out.quad_verts = tuple(v / 100 for v in verts)
+    if TLV_PARAGRAPH_ALIGN in by_tag:
+        out.paragraph_align = parse_paragraph_runs(by_tag[TLV_PARAGRAPH_ALIGN])
+    if TLV_PARAGRAPH_UNDERLINE in by_tag:
+        out.paragraph_underline = parse_paragraph_runs(by_tag[TLV_PARAGRAPH_UNDERLINE])
+    if TLV_PARAGRAPH_STRIKE in by_tag:
+        out.paragraph_strike = parse_paragraph_runs(by_tag[TLV_PARAGRAPH_STRIKE])
+    if TLV_PARAGRAPH_UNK_18 in by_tag:
+        out.paragraph_unk_18 = parse_paragraph_runs(by_tag[TLV_PARAGRAPH_UNK_18])
 
-    out["_undecoded_tail"] = b""
-    out["_undecoded_tail_offset"] = len(attributes)
-
-    if DEBUG:
-        for k, v in out.items():
-            if k.startswith("_"):
-                continue
-            if isinstance(v, list):
-                print(f"{k}:")
-                for i, item in enumerate(v):
-                    print(f"  [{i}] {item}")
-            else:
-                print(f"{k}: {v}")
-        if out["_undecoded_tail"]:
-            print(
-                f"undecoded tail: {len(out['_undecoded_tail'])} bytes from offset "
-                f"{out['_undecoded_tail_offset']}"
-            )
+    out.undecoded_tail_offset = len(attributes)
 
     return out
+
+
+def process_text_layer_add_attributes(blob: bytes) -> TextAttributes:
+    """Decode the per-layer ``TextLayerAddAttributesV01`` blob.
+
+    Layout::
+
+        u32 LE  body_size = len(blob) - 4
+        body                        # same format as TextLayerAttributes
+    """
+    if len(blob) < 4:
+        raise ValueError(f"TextLayerAddAttributesV01 too short: {len(blob)}B")
+    body_size = struct.unpack_from("<I", blob, 0)[0]
+    if body_size != len(blob) - 4:
+        raise ValueError(
+            f"TextLayerAddAttributesV01 size mismatch: header={body_size}, "
+            f"body bytes available={len(blob) - 4}"
+        )
+    return process_text_attributes(blob[4:])

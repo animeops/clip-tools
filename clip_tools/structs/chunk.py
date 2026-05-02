@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Tuple, Union
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Union
 import struct
 import zlib
 import numpy as np
@@ -13,28 +14,45 @@ from clip_tools.structs.binc import BincDocument, is_binc, parse_binc
 logger = logging.getLogger(__name__)
 
 
-def parse_chnk_head_body(body: bytes) -> Dict[str, Any]:
+@dataclass
+class ChunkHeader:
+    """Decoded `CHNKHead` body."""
+
+    version: int  # observed 256 (=0x100; format v1.0?)
+    binary_section_size: int  # = (clip-binary-region length) - 16
+    identifier_length: int  # observed 16
+    identifier: bytes  # per-file UUID-like
+    raw: Optional[bytes] = None  # set instead of the above when body < 40 bytes
+
+
+def parse_chnk_head_body(body: bytes) -> ChunkHeader:
     """Decode the 40-byte CHNKHead body.
 
     Layout (big-endian)::
 
-        u64  version              # observed 256 (=0x100; format v1.0?)
-        u64  binary_section_size  # = (clip-binary-region length) - 16
-        u64  identifier_length    # observed 16
-        byte[16] identifier       # per-file unique value (UUID-like)
+        u64  version
+        u64  binary_section_size
+        u64  identifier_length
+        byte[16] identifier
     """
     if len(body) < 40:
-        return {"raw": bytes(body)}
+        return ChunkHeader(
+            version=0,
+            binary_section_size=0,
+            identifier_length=0,
+            identifier=b"",
+            raw=bytes(body),
+        )
     version = struct.unpack_from(">Q", body, 0)[0]
     binary_section_size = struct.unpack_from(">Q", body, 8)[0]
     identifier_length = struct.unpack_from(">Q", body, 16)[0]
     identifier = bytes(body[24 : 24 + 16])
-    return {
-        "version": version,
-        "binary_section_size": binary_section_size,
-        "identifier_length": identifier_length,
-        "identifier": identifier,
-    }
+    return ChunkHeader(
+        version=version,
+        binary_section_size=binary_section_size,
+        identifier_length=identifier_length,
+        identifier=identifier,
+    )
 
 
 def process_chunk_binary(
@@ -45,7 +63,7 @@ def process_chunk_binary(
 ) -> Tuple[
     Dict[str, Union[Dict[int, bytes], bytes, BincDocument]],
     Dict[str, int],
-    Dict[str, Any],
+    Optional[ChunkHeader],
     Dict[str, Dict[str, List[int]]],
 ]:
     """Parse the chunk-stream binary region.
@@ -71,7 +89,7 @@ def process_chunk_binary(
     chunk_dict: Dict[str, Union[Dict[int, bytes], bytes]] = {}
     num_skipped_dict: Dict[str, int] = {}
     block_metadata: Dict[str, Dict[str, List[int]]] = {}
-    file_header: Dict[str, Any] = {}
+    file_header: Optional[ChunkHeader] = None
     unknown_bd_ids: Dict[bytes, int] = {}
 
     num_external_ids = 0

@@ -8,7 +8,7 @@ from PIL import Image
 
 import logging
 
-from clip_tools.constants import DEBUG
+from clip_tools.constants import DEBUG, LayerFolderBit
 from clip_tools.structs import (
     process_text_attributes,
     process_resizable_image_attributes,
@@ -160,10 +160,10 @@ class ClipLayer:
                 attr_ds = self._text_attrs
 
                 layer_offset_x = (
-                    layer_metadata["LayerOffsetX"] + attr_ds["general_offset_x"]
+                    layer_metadata["LayerOffsetX"] + attr_ds.general_offset_x
                 )
                 layer_offset_y = (
-                    layer_metadata["LayerOffsetY"] + attr_ds["general_offset_y"]
+                    layer_metadata["LayerOffsetY"] + attr_ds.general_offset_y
                 )
             except Exception:
                 print(
@@ -200,7 +200,9 @@ class ClipLayer:
         return (layer_offset_x, layer_offset_y, 0, 0)
 
     def is_group(self) -> bool:
-        return self._record.loc[self._idx]["LayerFolder"] in [1, 17]
+        return bool(
+            self._record.loc[self._idx]["LayerFolder"] & LayerFolderBit.IS_FOLDER
+        )
 
     def __iter__(self) -> Iterator[ClipLayer]:
         return iter(self._children)
@@ -292,8 +294,8 @@ class ClipLayer:
 
                 layer_buffer = np.zeros((*self._canvas_size, 4), dtype=np.uint8)
 
-                source_coords = layer._resizable_image_attrs["source_coords"]
-                polygon_coords = layer._resizable_image_attrs["polygon_coords"]
+                source_coords = layer._resizable_image_attrs.source_coords
+                polygon_coords = layer._resizable_image_attrs.polygon_coords
                 transform = calculate_homography(source_coords, polygon_coords)
                 layer_buffer = backward_mapping(
                     transform, layer_img, layer_buffer, polygon_coords

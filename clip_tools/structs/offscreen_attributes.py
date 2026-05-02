@@ -1,60 +1,90 @@
+"""Parser for the per-Offscreen `Attribute` blob (the section-sized,
+named-section container that holds canvas/block geometry, init-color, and
+block-size tables for a raster Offscreen)."""
+
 import struct
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 from clip_tools.utils import read_binary_spec
 
 
-def process_offscreen_attributes(attribute: bytes) -> Dict[str, Any]:
+@dataclass
+class OffscreenAttributes:
+    """Decoded Offscreen.Attribute blob.
+
+    See `process_offscreen_attributes` for layout details. Names like
+    `color_mode`, `alpha_flag`, `bit_depth_enum`, `initcolor_magic` are
+    positional inferences: their values are constant across every observed
+    sample, so the labels are educated guesses and could be confirmed only
+    by samples with different color modes / bit depths.
+    """
+
+    section_sizes: Tuple[
+        int, int, int, int
+    ]  # (self_size=16, param_len, initcolor_len, blocksize_len)
+
+    # --- Parameter section ---
+    width: int
+    height: int
+    cols: int
+    rows: int
+    color_mode: int  # observed always 33
+    alpha_flag: int  # observed always 1
+    num_channels: int
+    bit_depth_enum: int  # observed always 5
+    block_bytes: int  # observed always 256*256
+    subblocks_per_block: int  # observed always 32*32
+    block_width: int
+    block_height: int
+    block_stride: int
+    subblock_width: int
+    subblock_height: int
+
+    # --- InitColor section ---
+    initcolor_magic: int  # observed always 20
+    has_init_color: bool
+    init_color: int  # packed RGBA u32; 0xFFFFFFFF = opaque white
+    init_color_extra: Optional[Tuple[int, int, int, int]] = (
+        None  # 4 channels (high byte of each u32)
+    )
+    init_color_extra_raw: Optional[Tuple[int, int, int, int]] = None  # raw u32s
+
+    # --- BlockSize section ---
+    blocksize_magic: int = 0
+    block_sizes: List[int] = field(default_factory=list)
+
+
+def process_offscreen_attributes(attribute: bytes) -> OffscreenAttributes:
     """Parse an Offscreen.Attribute blob.
 
     The blob is a self-describing TLV-like structure with three sections
     ("Parameter", "InitColor", "BlockSize") preceded by a 16-byte section-size
     table and separated by `9`-valued boundary markers.
 
-    Layout (bytes):
+    Layout (bytes)::
+
         section_sizes   : 4 x u32  (self_size=16, param_len=102, initcolor_len, blocksize_len)
         boundary        : u32 = 9
         "Parameter" (utf-16be, 18 bytes)
         width, height   : 2 x u32
         cols, rows      : 2 x u32   # block grid; nblocks = cols * rows
-        color_mode      : 4 x u32 = (33, 1, num_channels, 5)    # color_mode, alpha_flag, nchan, bit_depth
-        block_geom      : 4 x u32 = (65536, 4, 1024, 1)         # block_bytes, nchan, subblocks/block, flag
+        color_mode      : 4 x u32 = (33, 1, num_channels, 5)
+        block_geom      : 4 x u32 = (65536, 4, 1024, 1)
         block_dims      : 4 x u32 = (block_w, 65536, block_h, stride)
         subblock_dims   : 4 x u32 = (subblock_w, subblock_h, 0, 0)
         boundary        : u32 = 9
         "InitColor" (utf-16be, 18 bytes)
         initcolor_magic : u32 = 20
         init_color      : 4 x u32 = (has_color, packed_rgba, nchan, nchan)
-        [if has_color==1: 16 bytes extra color payload, zeros in all observed samples]
+        [if has_color==1: 16-byte extra color payload]
         boundary        : u32 = 9
         "BlockSize" (utf-16be, 18 bytes)
         blocksize_hdr   : 3 x u32 = (magic=12, nblocks, nchan)
-        block_sizes     : nblocks x u32  # compressed byte-size of each block's data
+        block_sizes     : nblocks x u32
 
-    The `section_sizes` table allows skipping whole sections without knowing
-    internal layout:
-        section_sizes[0] = 16                       # size of this table itself
-        section_sizes[1] = 102                      # length of Parameter section (incl. B1)
-        section_sizes[2] = 42 or 58                 # length of InitColor section (42 base, +16 if has_color)
-        section_sizes[3] = 34 + 4 * nblocks         # length of BlockSize section
-
-    Unresolved / inferred (not yet cracked with sample diversity):
-        - color_mode=33, alpha_flag=1, bit_depth_enum=5 — values have been
-          constant across every sample; the *labels* are best guesses based
-          on position and would need samples with different color modes
-          (grayscale, 16-bit, etc.) to confirm semantics.
-        - block_bytes, block_geom flag=1, block_stride=256 — constant everywhere;
-          labels inferred from arithmetic (65536 = 256*256, 1024 = 32*32).
-        - initcolor_magic=20 — constant; could be a section type marker OR a
-          length field that happens to equal 20 for the common UNK7 layout.
-        - init_color_extra — the 16-byte trailer appears only when has_color==1,
-          and has been all-zeros in every sample. Purpose unconfirmed. A layer
-          with a non-default (non-white) init color would likely reveal semantics.
-
-    Not yet parsed elsewhere in the codebase:
-        - `text_attributes.py` still has ~30 unnamed uint reads marked "?".
-        - `vector.py` has several `mystery_N` stroke fields.
-        Both need richer sample files (with text / vector content) to decode.
+    See `unknowns.md` for fields whose semantics are inferred but not
+    confirmed (color_mode/alpha_flag/bit_depth_enum/initcolor_magic).
     """
     PARAMETER_HEADER = "Parameter".encode("utf-16be")
     INITCOLOR_HEADER = "InitColor".encode("utf-16be")
@@ -62,106 +92,91 @@ def process_offscreen_attributes(attribute: bytes) -> Dict[str, Any]:
 
     uint_spec = struct.Struct(">I")
     uint2_spec = struct.Struct(">II")
-    uint4_spec = struct.Struct(">IIII")
     uint3_spec = struct.Struct(">III")
-
-    attr_ds: Dict[str, Any] = {}
+    uint4_spec = struct.Struct(">IIII")
 
     pos = 0
-    data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    section_sizes = data  # (self_size=16, param_len, initcolor_len, blocksize_len)
-    attr_ds["section_sizes"] = section_sizes
+    section_sizes, pos = read_binary_spec(attribute, uint4_spec, pos)
 
     # --- Parameter section ---
-    data, pos = read_binary_spec(attribute, uint_spec, pos)
-    # boundary marker (9)
+    _boundary, pos = read_binary_spec(attribute, uint_spec, pos)
+    if attribute[pos : pos + len(PARAMETER_HEADER)] != PARAMETER_HEADER:
+        raise ValueError("Invalid attribute: missing Parameter header")
+    pos += len(PARAMETER_HEADER)
 
-    if attribute[pos : pos + len(PARAMETER_HEADER)] == PARAMETER_HEADER:
-        pos += len(PARAMETER_HEADER)
-    else:
-        raise Exception("Invalid attribute: missing Parameter header")
-
-    data, pos = read_binary_spec(attribute, uint2_spec, pos)
-    attr_ds["width"] = data[0]
-    attr_ds["height"] = data[1]
-
-    data, pos = read_binary_spec(attribute, uint2_spec, pos)
-    attr_ds["cols"] = data[0]
-    attr_ds["rows"] = data[1]
-
-    data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # Inferred labels — (color_mode=33, alpha_flag=1, num_channels, bit_depth_enum=5).
-    # Only num_channels has been verified; others constant across every sample.
-    attr_ds["color_mode"] = data[0]
-    attr_ds["alpha_flag"] = data[1]
-    attr_ds["num_channels"] = data[2]
-    attr_ds["bit_depth_enum"] = data[3]
-
-    data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # block_bytes = 256*256; subblocks_per_block = 32*32. Other two constant.
-    attr_ds["block_bytes"] = data[0]
-    attr_ds["subblocks_per_block"] = data[2]
-
-    data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (block_width, block_bytes duplicate, block_height, block_stride — inferred)
-    attr_ds["block_width"] = data[0]
-    attr_ds["block_height"] = data[2]
-    attr_ds["block_stride"] = data[3]
-
-    data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # Inferred subblock dims (8x8). Tail two u32 always zero — reserved/padding.
-    attr_ds["subblock_width"] = data[0]
-    attr_ds["subblock_height"] = data[1]
+    (width, height), pos = read_binary_spec(attribute, uint2_spec, pos)
+    (cols, rows), pos = read_binary_spec(attribute, uint2_spec, pos)
+    (color_mode, alpha_flag, num_channels, bit_depth_enum), pos = read_binary_spec(
+        attribute, uint4_spec, pos
+    )
+    block_geom, pos = read_binary_spec(attribute, uint4_spec, pos)
+    block_bytes = block_geom[0]
+    subblocks_per_block = block_geom[2]
+    block_dims, pos = read_binary_spec(attribute, uint4_spec, pos)
+    block_width, _, block_height, block_stride = block_dims
+    subblock_dims, pos = read_binary_spec(attribute, uint4_spec, pos)
+    subblock_width, subblock_height = subblock_dims[0], subblock_dims[1]
 
     # --- InitColor section ---
-    data, pos = read_binary_spec(attribute, uint_spec, pos)
-    # boundary marker (9)
+    _boundary, pos = read_binary_spec(attribute, uint_spec, pos)
+    if attribute[pos : pos + len(INITCOLOR_HEADER)] != INITCOLOR_HEADER:
+        raise ValueError("Invalid attribute: missing InitColor header")
+    pos += len(INITCOLOR_HEADER)
 
-    if attribute[pos : pos + len(INITCOLOR_HEADER)] == INITCOLOR_HEADER:
-        pos += len(INITCOLOR_HEADER)
-    else:
-        raise Exception("Invalid attribute: missing InitColor header")
+    (initcolor_magic,), pos = read_binary_spec(attribute, uint_spec, pos)
+    init_color_quad, pos = read_binary_spec(attribute, uint4_spec, pos)
+    has_init_color = bool(init_color_quad[0])
+    init_color = init_color_quad[1]
 
-    data, pos = read_binary_spec(attribute, uint_spec, pos)
-    # Always 20 across every observed sample. Section-type marker, OR length
-    # of the following UNK7-only body (also 20 bytes in the no-color case).
-    # Not yet disambiguated.
-    attr_ds["initcolor_magic"] = data[0]
-
-    data, pos = read_binary_spec(attribute, uint4_spec, pos)
-    # (has_color, packed_rgba, nchan, nchan) — verified: paper layer = white
-    attr_ds["has_init_color"] = bool(data[0])
-    attr_ds["init_color"] = data[1]  # packed RGBA u32, 0xFFFFFFFF = opaque white
-
-    if attr_ds["has_init_color"]:
-        data, pos = read_binary_spec(attribute, uint4_spec, pos)
-        # 4× u32, each scaled by >> 24 to extract the high byte = an 8-bit
-        # color channel (RGBA). In observed samples this is all zeros
-        # (paper layer's color is in the `init_color` field above; the
-        # extra 4-channel form is for non-default tinted colors).
-        attr_ds["init_color_extra"] = tuple(min(255, v >> 24) for v in data)
-        attr_ds["init_color_extra_raw"] = data
+    init_color_extra: Optional[Tuple[int, int, int, int]] = None
+    init_color_extra_raw: Optional[Tuple[int, int, int, int]] = None
+    if has_init_color:
+        extra, pos = read_binary_spec(attribute, uint4_spec, pos)
+        # 4× u32, each shifted right by 24 to extract the high byte = an
+        # 8-bit RGBA channel.
+        init_color_extra = tuple(min(255, v >> 24) for v in extra)
+        init_color_extra_raw = extra
 
     # --- BlockSize section ---
-    data, pos = read_binary_spec(attribute, uint_spec, pos)
-    # boundary marker (9)
+    _boundary, pos = read_binary_spec(attribute, uint_spec, pos)
+    if attribute[pos : pos + len(BLOCKSIZE_HEADER)] != BLOCKSIZE_HEADER:
+        raise ValueError("Invalid attribute: missing BlockSize header")
+    pos += len(BLOCKSIZE_HEADER)
 
-    if attribute[pos : pos + len(BLOCKSIZE_HEADER)] == BLOCKSIZE_HEADER:
-        pos += len(BLOCKSIZE_HEADER)
-    else:
-        raise Exception("Invalid attribute: missing BlockSize header")
-
-    data, pos = read_binary_spec(attribute, uint3_spec, pos)
-    # (magic=12, nblocks, nchan) — nblocks == cols * rows
-    attr_ds["blocksize_magic"] = data[0]
-    nblocks = data[1]
+    (blocksize_magic, nblocks, _nchan), pos = read_binary_spec(
+        attribute, uint3_spec, pos
+    )
 
     rest = attribute[pos:]
     expected_tail_bytes = 4 * nblocks
     if len(rest) != expected_tail_bytes:
-        raise Exception(
+        raise ValueError(
             f"BlockSize tail length mismatch: got {len(rest)}, expected {expected_tail_bytes}"
         )
-    attr_ds["block_sizes"] = list(struct.unpack(f">{nblocks}I", rest))
+    block_sizes = list(struct.unpack(f">{nblocks}I", rest))
 
-    return attr_ds
+    return OffscreenAttributes(
+        section_sizes=section_sizes,
+        width=width,
+        height=height,
+        cols=cols,
+        rows=rows,
+        color_mode=color_mode,
+        alpha_flag=alpha_flag,
+        num_channels=num_channels,
+        bit_depth_enum=bit_depth_enum,
+        block_bytes=block_bytes,
+        subblocks_per_block=subblocks_per_block,
+        block_width=block_width,
+        block_height=block_height,
+        block_stride=block_stride,
+        subblock_width=subblock_width,
+        subblock_height=subblock_height,
+        initcolor_magic=initcolor_magic,
+        has_init_color=has_init_color,
+        init_color=init_color,
+        init_color_extra=init_color_extra,
+        init_color_extra_raw=init_color_extra_raw,
+        blocksize_magic=blocksize_magic,
+        block_sizes=block_sizes,
+    )

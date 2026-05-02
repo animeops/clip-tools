@@ -15,10 +15,10 @@ def process_layer_blocks(
 
     attr_ds = process_offscreen_attributes(offscreen["Attribute"])
 
-    block_width = attr_ds["block_width"]
-    block_height = attr_ds["block_height"]
+    block_width = attr_ds.block_width
+    block_height = attr_ds.block_height
 
-    num_channels = attr_ds["num_channels"]
+    num_channels = attr_ds.num_channels
 
     header_index = (
         offscreen["Attribute"].index(PARAMETER_HEADER) + len(PARAMETER_HEADER) + 8
@@ -94,4 +94,4 @@ def process_layer_blocks(
             * block_width,
         ] = main_img
 
-    return buffer[: attr_ds["height"], : attr_ds["width"]]
+    return buffer[: attr_ds.height, : attr_ds.width]

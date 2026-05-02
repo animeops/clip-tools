@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from clip_tools.constants import DEBUG
+from clip_tools.constants import DEBUG, LayerFolderBit
 from clip_tools.rendering import (  # re-exported for backwards compat
     extract_brush_pattern_images,
     rasterize_vectors,
@@ -59,7 +59,7 @@ def augment_layer_df(layer_df: pd.DataFrame) -> pd.DataFrame:
     layer_df["ParentLayer"] = 0
 
     for _, row in layer_df.iterrows():
-        if row["LayerFolder"] not in [1, 17]:
+        if not (row["LayerFolder"] & LayerFolderBit.IS_FOLDER):
             continue
         if row["LayerFirstChildIndex"] == 0:
             continue
