@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -176,4 +176,378 @@ class BrushStyle:
             flow_effector=as_bytes("FlowEffector"),
             thickness_effector=as_bytes("ThicknessEffector"),
             interval_effector=as_bytes("IntervalEffector"),
+        )
+
+
+# Columns from the Layer SQLite schema that exist but we don't bind to a
+# dataclass field — either always-zero/empty, or carry data we explicitly
+# don't model yet. Anything outside this set + the LayerRecord field set
+# raises in `from_row`, so a new CSP version that adds a column gets caught
+# at parse time.
+LAYER_RECORD_IGNORED_COLUMNS = frozenset()
+
+
+_LAYER_RECORD_FIELD_TO_COLUMN = {
+    "pw_id": "_PW_ID",
+    "main_id": "MainId",
+    "canvas_id": "CanvasId",
+    "layer_uuid": "LayerUuid",
+    "layer_name": "LayerName",
+    "layer_type": "LayerType",
+    "layer_folder": "LayerFolder",
+    "layer_lock": "LayerLock",
+    "layer_masking": "LayerMasking",
+    "layer_visibility": "LayerVisibility",
+    "layer_clip": "LayerClip",
+    "layer_select": "LayerSelect",
+    "layer_composite": "LayerComposite",
+    "layer_opacity": "LayerOpacity",
+    "layer_first_child_index": "LayerFirstChildIndex",
+    "layer_next_index": "LayerNextIndex",
+    "parent_layer": "ParentLayer",
+    "prefix": "Prefix",
+    "layer_offset_x": "LayerOffsetX",
+    "layer_offset_y": "LayerOffsetY",
+    "layer_render_offscr_offset_x": "LayerRenderOffscrOffsetX",
+    "layer_render_offscr_offset_y": "LayerRenderOffscrOffsetY",
+    "layer_mask_offset_x": "LayerMaskOffsetX",
+    "layer_mask_offset_y": "LayerMaskOffsetY",
+    "layer_mask_offscr_offset_x": "LayerMaskOffscrOffsetX",
+    "layer_mask_offscr_offset_y": "LayerMaskOffscrOffsetY",
+    "layer_render_mipmap": "LayerRenderMipmap",
+    "layer_layer_mask_mipmap": "LayerLayerMaskMipmap",
+    "layer_render_thumbnail": "LayerRenderThumbnail",
+    "layer_layer_mask_thumbnail": "LayerLayerMaskThumbnail",
+    "layer_use_palette_color": "LayerUsePaletteColor",
+    "layer_noticeable_palette_color": "LayerNoticeablePaletteColor",
+    "layer_palette_red": "LayerPaletteRed",
+    "layer_palette_green": "LayerPaletteGreen",
+    "layer_palette_blue": "LayerPaletteBlue",
+    "draw_color_enable": "DrawColorEnable",
+    "draw_color_main_red": "DrawColorMainRed",
+    "draw_color_main_green": "DrawColorMainGreen",
+    "draw_color_main_blue": "DrawColorMainBlue",
+    "layer_color_type_index": "LayerColorTypeIndex",
+    "layer_color_type_black_checked": "LayerColorTypeBlackChecked",
+    "layer_color_type_white_checked": "LayerColorTypeWhiteChecked",
+    "monochrome_fill_info": "MonochromeFillInfo",
+    "draw_render_thumbnail_type": "DrawRenderThumbnailType",
+    "draw_to_render_mipmap_type": "DrawToRenderMipmapType",
+    "draw_to_render_offscreen_type": "DrawToRenderOffscreenType",
+    "fix_offset_and_expand_type": "FixOffsetAndExpandType",
+    "move_offset_and_expand_type": "MoveOffsetAndExpandType",
+    "render_bound_for_layer_move_type": "RenderBoundForLayerMoveType",
+    "set_render_thumbnail_info_type": "SetRenderThumbnailInfoType",
+    "special_render_type": "SpecialRenderType",
+    "special_ruler_manager": "SpecialRulerManager",
+    "mix_sub_color_for_every_plot": "MixSubColorForEveryPlot",
+    "light_table_info": "LightTableInfo",
+    "vector_normal_stroke_index": "VectorNormalStrokeIndex",
+    "vector_normal_fill_index": "VectorNormalFillIndex",
+    "vector_normal_balloon_index": "VectorNormalBalloonIndex",
+    "vector_normal_type": "VectorNormalType",
+    "text_layer_type": "TextLayerType",
+    "text_layer_attributes": "TextLayerAttributes",
+    "text_layer_add_attributes_v01": "TextLayerAddAttributesV01",
+    "text_layer_string": "TextLayerString",
+    "text_layer_attributes_version": "TextLayerAttributesVersion",
+    "resizable_image_info": "ResizableImageInfo",
+    "camera_2d_resizable_image_info": "Camera2DResizableImageInfo",
+    "camera_2d_apply_transform": "Camera2DApplyTransform",
+    "camera_2d_original_frame_center_x": "Camera2DOriginalFrameCenterX",
+    "camera_2d_original_frame_center_y": "Camera2DOriginalFrameCenterY",
+    "animation_folder": "AnimationFolder",
+    "animation_cel_current_uuid": "AnimationCelCurrentUuid",
+    "timeline_layer_keyframe_enabled": "TimeLineLayerKeyFrameEnabled",
+    "timeline_render_fix_aspect_ratio": "TimeLineRenderFixAspectRatio",
+    "material_content_type": "MaterialContentType",
+    "ruler_range": "RulerRange",
+    "guide_move": "GuideMove",
+}
+
+LAYER_RECORD_KNOWN_COLUMNS = (
+    frozenset(_LAYER_RECORD_FIELD_TO_COLUMN.values()) | LAYER_RECORD_IGNORED_COLUMNS
+)
+
+
+@dataclass
+class LayerRecord:
+    """A typed view of one row of the Layer SQLite table.
+
+    Field set covers every column observed populated in real .clip files
+    (test fixtures + production wn_* samples). Unpopulated columns from the
+    raw schema are intentionally omitted — add them as they become relevant
+    rather than carrying an exhaustive 200-field surface.
+    """
+
+    # --- Identity ---
+    pw_id: int  # `_PW_ID` — primary-key index added by augment_layer_df
+    main_id: int
+    canvas_id: int
+    layer_uuid: str
+    layer_name: str
+
+    # --- Type / flags ---
+    layer_type: int  # see LayerKind enum
+    layer_folder: int  # see LayerFolderBit
+    layer_lock: int  # see LayerLockBit
+    layer_masking: int
+    layer_visibility: int
+    layer_clip: int
+    layer_select: int
+    layer_composite: int  # see LayerComposite enum
+    layer_opacity: int  # 0..256
+
+    # --- Tree pointers ---
+    layer_first_child_index: int
+    layer_next_index: int
+    parent_layer: int  # injected by augment_layer_df
+    prefix: List[str]  # injected by augment_layer_df
+
+    # --- Offsets ---
+    layer_offset_x: int
+    layer_offset_y: int
+    layer_render_offscr_offset_x: int
+    layer_render_offscr_offset_y: int
+    layer_mask_offset_x: int
+    layer_mask_offset_y: int
+    layer_mask_offscr_offset_x: int
+    layer_mask_offscr_offset_y: int
+
+    # --- Mipmap / thumbnail FKs ---
+    layer_render_mipmap: int
+    layer_layer_mask_mipmap: int
+    layer_render_thumbnail: int
+    layer_layer_mask_thumbnail: int
+
+    # --- Palette / sticker color ---
+    layer_use_palette_color: int
+    layer_noticeable_palette_color: int
+    layer_palette_red: int
+    layer_palette_green: int
+    layer_palette_blue: int
+
+    # --- Fill color (correction layers) ---
+    draw_color_enable: Optional[float] = None
+    draw_color_main_red: Optional[float] = None  # u32 channel value (0..2^32-1)
+    draw_color_main_green: Optional[float] = None
+    draw_color_main_blue: Optional[float] = None
+
+    # --- Color-type / monochrome (manga ink/tone) ---
+    layer_color_type_index: Optional[float] = None
+    layer_color_type_black_checked: Optional[float] = None
+    layer_color_type_white_checked: Optional[float] = None
+    monochrome_fill_info: Optional[bytes] = None
+
+    # --- Render pipeline / dirty flags ---
+    draw_render_thumbnail_type: Optional[float] = None
+    draw_to_render_mipmap_type: Optional[float] = None
+    draw_to_render_offscreen_type: Optional[float] = None
+    fix_offset_and_expand_type: Optional[float] = None
+    move_offset_and_expand_type: Optional[float] = None
+    render_bound_for_layer_move_type: Optional[float] = None
+    set_render_thumbnail_info_type: Optional[float] = None
+    special_render_type: Optional[float] = None
+    special_ruler_manager: Optional[float] = None
+    mix_sub_color_for_every_plot: Optional[float] = None
+
+    # --- Light table (per-folder reference image) ---
+    light_table_info: Optional[bytes] = None
+
+    # --- Vector layer state ---
+    vector_normal_stroke_index: Optional[float] = None
+    vector_normal_fill_index: Optional[float] = None
+    vector_normal_balloon_index: Optional[float] = None
+    vector_normal_type: Optional[float] = None
+
+    # --- Text layer ---
+    text_layer_type: Optional[float] = None
+    text_layer_attributes: Optional[bytes] = None
+    text_layer_add_attributes_v01: Optional[bytes] = None
+    text_layer_string: Optional[bytes] = None
+    text_layer_attributes_version: Optional[float] = None
+
+    # --- Resizable / Camera 2D ---
+    resizable_image_info: Optional[bytes] = None
+    camera_2d_resizable_image_info: Optional[bytes] = None
+    camera_2d_apply_transform: Optional[float] = None
+    camera_2d_original_frame_center_x: Optional[float] = None
+    camera_2d_original_frame_center_y: Optional[float] = None
+
+    # --- Animation ---
+    animation_folder: Optional[float] = None
+    animation_cel_current_uuid: Optional[str] = None
+    timeline_layer_keyframe_enabled: Optional[float] = None
+    timeline_render_fix_aspect_ratio: Optional[float] = None
+
+    # --- Misc ---
+    material_content_type: Optional[float] = None
+    ruler_range: Optional[float] = None
+    guide_move: Optional[float] = None
+
+    @classmethod
+    def from_row(cls, row) -> "LayerRecord":
+        """Build from a pandas Series (one row of the Layer DataFrame).
+
+        Loud KeyError on missing required columns; silent default for optional
+        float/bytes columns (CLIP omits them when the layer doesn't use that
+        feature, so they show up as NaN rather than 0).
+
+        Loud ValueError on unrecognized populated columns — if CSP adds a new
+        Layer column we don't know about, we want to find out at parse time
+        rather than silently drop the data. Add the field to the dataclass (or
+        to LAYER_RECORD_IGNORED_COLUMNS if it's noise).
+        """
+        unknown = []
+        for col in row.index:
+            if col in LAYER_RECORD_KNOWN_COLUMNS:
+                continue
+            v = row[col]
+            if v is None:
+                continue
+            if isinstance(v, float) and np.isnan(v):
+                continue
+            if isinstance(v, (bytes, bytearray)) and len(v) == 0:
+                continue
+            unknown.append(col)
+        if unknown:
+            raise ValueError(
+                f"LayerRecord: unrecognized populated Layer column(s): {unknown}. "
+                f"Add to the dataclass or to LAYER_RECORD_IGNORED_COLUMNS."
+            )
+
+        def as_float(key, default=0.0):
+            if key not in row:
+                return default
+            v = row[key]
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return default
+            return float(v)
+
+        def as_int(key, default=0):
+            if key not in row:
+                return default
+            v = row[key]
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return default
+            return int(v)
+
+        def as_str(key, default=""):
+            if key not in row:
+                return default
+            v = row[key]
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return default
+            if isinstance(v, (bytes, bytearray)):
+                return v.decode("utf-8", errors="replace")
+            return str(v)
+
+        def opt_float(key):
+            if key not in row:
+                return None
+            v = row[key]
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return None
+            return float(v)
+
+        def opt_str(key):
+            if key not in row:
+                return None
+            v = row[key]
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return None
+            if isinstance(v, (bytes, bytearray)):
+                return v.decode("utf-8", errors="replace")
+            return str(v)
+
+        def opt_bytes(key):
+            if key not in row:
+                return None
+            v = row[key]
+            if isinstance(v, (bytes, bytearray)) and len(v) > 0:
+                return bytes(v)
+            return None
+
+        def as_list(key):
+            if key not in row:
+                return []
+            v = row[key]
+            return list(v) if isinstance(v, (list, tuple)) else []
+
+        return cls(
+            pw_id=as_int("_PW_ID"),
+            main_id=as_int("MainId"),
+            canvas_id=as_int("CanvasId"),
+            layer_uuid=as_str("LayerUuid"),
+            layer_name=as_str("LayerName"),
+            layer_type=as_int("LayerType"),
+            layer_folder=as_int("LayerFolder"),
+            layer_lock=as_int("LayerLock"),
+            layer_masking=as_int("LayerMasking"),
+            layer_visibility=as_int("LayerVisibility"),
+            layer_clip=as_int("LayerClip"),
+            layer_select=as_int("LayerSelect"),
+            layer_composite=as_int("LayerComposite"),
+            layer_opacity=as_int("LayerOpacity", 256),
+            layer_first_child_index=as_int("LayerFirstChildIndex"),
+            layer_next_index=as_int("LayerNextIndex"),
+            parent_layer=as_int("ParentLayer"),
+            prefix=as_list("Prefix"),
+            layer_offset_x=as_int("LayerOffsetX"),
+            layer_offset_y=as_int("LayerOffsetY"),
+            layer_render_offscr_offset_x=as_int("LayerRenderOffscrOffsetX"),
+            layer_render_offscr_offset_y=as_int("LayerRenderOffscrOffsetY"),
+            layer_mask_offset_x=as_int("LayerMaskOffsetX"),
+            layer_mask_offset_y=as_int("LayerMaskOffsetY"),
+            layer_mask_offscr_offset_x=as_int("LayerMaskOffscrOffsetX"),
+            layer_mask_offscr_offset_y=as_int("LayerMaskOffscrOffsetY"),
+            layer_render_mipmap=as_int("LayerRenderMipmap"),
+            layer_layer_mask_mipmap=as_int("LayerLayerMaskMipmap"),
+            layer_render_thumbnail=as_int("LayerRenderThumbnail"),
+            layer_layer_mask_thumbnail=as_int("LayerLayerMaskThumbnail"),
+            layer_use_palette_color=as_int("LayerUsePaletteColor"),
+            layer_noticeable_palette_color=as_int("LayerNoticeablePaletteColor"),
+            layer_palette_red=as_int("LayerPaletteRed"),
+            layer_palette_green=as_int("LayerPaletteGreen"),
+            layer_palette_blue=as_int("LayerPaletteBlue"),
+            draw_color_enable=opt_float("DrawColorEnable"),
+            draw_color_main_red=opt_float("DrawColorMainRed"),
+            draw_color_main_green=opt_float("DrawColorMainGreen"),
+            draw_color_main_blue=opt_float("DrawColorMainBlue"),
+            layer_color_type_index=opt_float("LayerColorTypeIndex"),
+            layer_color_type_black_checked=opt_float("LayerColorTypeBlackChecked"),
+            layer_color_type_white_checked=opt_float("LayerColorTypeWhiteChecked"),
+            monochrome_fill_info=opt_bytes("MonochromeFillInfo"),
+            draw_render_thumbnail_type=opt_float("DrawRenderThumbnailType"),
+            draw_to_render_mipmap_type=opt_float("DrawToRenderMipmapType"),
+            draw_to_render_offscreen_type=opt_float("DrawToRenderOffscreenType"),
+            fix_offset_and_expand_type=opt_float("FixOffsetAndExpandType"),
+            move_offset_and_expand_type=opt_float("MoveOffsetAndExpandType"),
+            render_bound_for_layer_move_type=opt_float("RenderBoundForLayerMoveType"),
+            set_render_thumbnail_info_type=opt_float("SetRenderThumbnailInfoType"),
+            special_render_type=opt_float("SpecialRenderType"),
+            special_ruler_manager=opt_float("SpecialRulerManager"),
+            mix_sub_color_for_every_plot=opt_float("MixSubColorForEveryPlot"),
+            light_table_info=opt_bytes("LightTableInfo"),
+            vector_normal_stroke_index=opt_float("VectorNormalStrokeIndex"),
+            vector_normal_fill_index=opt_float("VectorNormalFillIndex"),
+            vector_normal_balloon_index=opt_float("VectorNormalBalloonIndex"),
+            vector_normal_type=opt_float("VectorNormalType"),
+            text_layer_type=opt_float("TextLayerType"),
+            text_layer_attributes=opt_bytes("TextLayerAttributes"),
+            text_layer_add_attributes_v01=opt_bytes("TextLayerAddAttributesV01"),
+            text_layer_string=opt_bytes("TextLayerString"),
+            text_layer_attributes_version=opt_float("TextLayerAttributesVersion"),
+            resizable_image_info=opt_bytes("ResizableImageInfo"),
+            camera_2d_resizable_image_info=opt_bytes("Camera2DResizableImageInfo"),
+            camera_2d_apply_transform=opt_float("Camera2DApplyTransform"),
+            camera_2d_original_frame_center_x=opt_float("Camera2DOriginalFrameCenterX"),
+            camera_2d_original_frame_center_y=opt_float("Camera2DOriginalFrameCenterY"),
+            animation_folder=opt_float("AnimationFolder"),
+            animation_cel_current_uuid=opt_str("AnimationCelCurrentUuid"),
+            timeline_layer_keyframe_enabled=opt_float("TimeLineLayerKeyFrameEnabled"),
+            timeline_render_fix_aspect_ratio=opt_float("TimeLineRenderFixAspectRatio"),
+            material_content_type=opt_float("MaterialContentType"),
+            ruler_range=opt_float("RulerRange"),
+            guide_move=opt_float("GuideMove"),
         )

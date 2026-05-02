@@ -12,7 +12,7 @@ from clip_tools.rendering import (  # re-exported for backwards compat
     rasterize_vectors,
 )
 from clip_tools.structs import process_layer_blocks
-from clip_tools.types import ExternalIdEntry, LayerEntry
+from clip_tools.types import ExternalIdEntry, LayerEntry, LayerRecord
 from clip_tools.utils import arr_to_pil
 
 
@@ -146,15 +146,14 @@ def process_clip_data(
                 )
                 continue
 
-            layer_metadata = layer_df[layer_df["MainId"] == layer_id].iloc[0]
-            layer_name = layer_metadata["LayerName"]
-            layer_prefix = layer_metadata["Prefix"]
-            layer_folder = layer_metadata["LayerFolder"]
+            layer_metadata = LayerRecord.from_row(
+                layer_df[layer_df["MainId"] == layer_id].iloc[0]
+            )
+            layer_name = layer_metadata.layer_name
+            layer_prefix = layer_metadata.prefix
+            layer_folder = layer_metadata.layer_folder
 
-            if (
-                "LayerClip" in layer_metadata.keys()
-                and layer_metadata["LayerClip"] != 0
-            ):
+            if layer_metadata.layer_clip != 0:
                 logger.warning(
                     f"WARNING: Skipping clipped layer: {layer_name} in folder: {layer_prefix}"
                 )

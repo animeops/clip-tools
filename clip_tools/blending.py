@@ -340,8 +340,10 @@ _PER_CHANNEL: dict = {
     LayerComposite.LIGHTEN: lighten,
     LayerComposite.SCREEN: screen,
     LayerComposite.COLOR_DODGE: color_dodge,
-    # GLOW_DODGE folds to COLOR_DODGE per-channel; alpha treatment differs
-    # (block-render variant) and is not yet wired in.
+    # GLOW_DODGE / ADD_GLOW share their per-channel formula with COLOR_DODGE
+    # / ADD, but composite_layer routes them through composite_glow which
+    # handles their distinct alpha math (saturating sum) and pre-multiplies
+    # the blend RGB by its alpha before applying the dodge.
     LayerComposite.GLOW_DODGE: color_dodge,
     LayerComposite.ADD: linear_dodge,
     LayerComposite.ADD_GLOW: linear_dodge,
@@ -388,8 +390,14 @@ def blend_rgb(
     return normal(base_rgb, blend_rgb)
 
 
+_GLOW_MODES = {LayerComposite.GLOW_DODGE, LayerComposite.ADD_GLOW}
+
+
 def composite_layer(
-    base_rgba: np.ndarray, blend_rgba: np.ndarray, mode: LayerComposite
+    base_rgba: np.ndarray,
+    blend_rgba: np.ndarray,
+    mode: LayerComposite,
+    preserve_transparency: bool = False,
 ) -> np.ndarray:
     """Composite `blend_rgba` onto `base_rgba` using `mode` for the RGB
     channels and standard alpha-over for the alpha channel.
@@ -402,7 +410,16 @@ def composite_layer(
         Cs_blended = blend(Cb, Cs)              # per `mode`
         Co = (1 - αs) * Cb + αs * Cs_blended    # straight alpha over
         αo = αs + αb * (1 - αs)
+
+    `preserve_transparency` is sourced from the layer's alpha-lock
+    (`Layer.LayerLock & LayerLockBit.ALPHA`). It only affects GLOW_DODGE /
+    ADD_GLOW; for all other modes the alpha-over wrappers ignore it.
     """
+    if mode in _GLOW_MODES:
+        return composite_glow_layer(
+            base_rgba, blend_rgba, mode, preserve_transparency=preserve_transparency
+        )
+
     cb_rgb = base_rgba[..., :3]
     cs_rgb = blend_rgba[..., :3]
     cb_a = base_rgba[..., 3:4].astype(np.float32) / 255.0
@@ -419,8 +436,78 @@ def composite_layer(
     return np.concatenate([out_rgb, out_a], axis=-1).round().astype(np.uint8)
 
 
+def composite_glow_layer(
+    base_rgba: np.ndarray,
+    blend_rgba: np.ndarray,
+    mode: LayerComposite,
+    preserve_transparency: bool = False,
+) -> np.ndarray:
+    """Glow Dodge / Add (Glow) compositing.
+
+    branching:
+
+    1. ``blend_alpha == 0`` → base unchanged.
+    2. Pre-multiply blend RGB by its own alpha to get ``bg_pm``.
+    3. Apply the per-channel formula (Color Dodge for GLOW_DODGE,
+       Linear Dodge for ADD_GLOW) to ``(base, bg_pm)`` to get ``result``.
+    4. **If `preserve_transparency` AND `blend_alpha < 255`**: weighted RGB
+       mix using effective alpha + saturating-sum output alpha.
+    5. **Otherwise** (opaque blend OR no alpha-lock): RGB = ``result``,
+       alpha = ``base_alpha`` (unchanged — *not* Porter-Duff over).
+
+    `preserve_transparency` corresponds to CSP's per-layer alpha lock
+    (`Layer.LayerLock & LayerLockBit.ALPHA`). Without it, the output alpha
+    just stays at the base alpha for any non-zero blend alpha.
+
+    Both inputs must be uint8 RGBA `(H, W, 4)` in straight alpha.
+    """
+    if mode == LayerComposite.GLOW_DODGE:
+        per_channel = color_dodge
+    elif mode == LayerComposite.ADD_GLOW:
+        per_channel = linear_dodge
+    else:
+        raise ValueError(f"composite_glow_layer called with non-glow mode {mode!r}")
+
+    cb_rgb = base_rgba[..., :3].astype(np.int32)
+    cs_rgb = blend_rgba[..., :3].astype(np.int32)
+    cb_a = base_rgba[..., 3:4].astype(np.int32)
+    cs_a = blend_rgba[..., 3:4].astype(np.int32)
+
+    # Step 2: premultiply blend by its own alpha (no-op when fully opaque).
+    bg_pm = np.where(cs_a == 255, cs_rgb, (cs_a * cs_rgb + 127) // 255)
+
+    # Step 3: per-channel formula on (base, bg_pm).
+    result = per_channel(cb_rgb.astype(np.uint8), bg_pm.astype(np.uint8)).astype(
+        np.int32
+    )
+
+    is_zero = cs_a == 0
+
+    if preserve_transparency:
+        # Step 4: partial-α + alpha-lock branch.
+        # eff_alpha = round((cs_a*255 + (255-cs_a)*cb_a) / 255)
+        eff_alpha = (cs_a * 255 + (255 - cs_a) * cb_a + 127) // 255
+        eff_alpha_safe = np.where(eff_alpha == 0, 1, eff_alpha)
+        # Q15 weight: cs_a / eff_alpha. Clamp to Q15 range as a guard.
+        w_q15 = np.minimum((cs_a * 32768) // eff_alpha_safe, 32768)
+        weighted_rgb = ((32768 - w_q15) * cb_rgb + w_q15 * result + 16384) >> 15
+        sat_alpha = np.minimum(255, cb_a + cs_a)
+
+        is_partial = (cs_a > 0) & (cs_a < 255)
+        out_rgb = np.where(is_zero, cb_rgb, np.where(is_partial, weighted_rgb, result))
+        out_a = np.where(is_zero, cb_a, np.where(is_partial, sat_alpha, cb_a))
+    else:
+        # Step 5: RGB = result, alpha = base_alpha (unchanged).
+        out_rgb = np.where(is_zero, cb_rgb, result)
+        out_a = cb_a
+
+    out = np.concatenate([out_rgb, out_a], axis=-1)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 __all__ = [
     "blend_rgb",
+    "composite_glow_layer",
     "composite_layer",
     "color_blend",
     "color_burn",

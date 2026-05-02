@@ -9,12 +9,12 @@ from PIL import Image
 import logging
 
 from clip_tools.blending import composite_layer
-from clip_tools.constants import DEBUG, LayerComposite, LayerFolderBit
+from clip_tools.constants import DEBUG, LayerComposite, LayerFolderBit, LayerLockBit
 from clip_tools.structs import (
     process_text_attributes,
     process_resizable_image_attributes,
 )
-from clip_tools.types import LayerEntry
+from clip_tools.types import LayerEntry, LayerRecord
 from clip_tools.utils import (
     calculate_homography,
     backward_mapping,
@@ -71,12 +71,22 @@ class ClipLayer:
             )
 
     @property
+    def metadata(self) -> LayerRecord:
+        """Typed view of this layer's row in the dataframe.
+
+        Built fresh on each access — the dataframe stays the source of truth
+        for writes (visibility/opacity setters), so the snapshot doesn't go
+        stale.
+        """
+        return LayerRecord.from_row(self._record.loc[self._idx])
+
+    @property
     def layer_id(self) -> int:
-        return self._record["MainId"].loc[self._idx]
+        return int(self._record["MainId"].loc[self._idx])
 
     @property
     def name(self) -> str:
-        return self._record["LayerName"].loc[self._idx]
+        return self.metadata.layer_name
 
     @property
     def layer_type(self) -> str:
@@ -87,7 +97,7 @@ class ClipLayer:
 
     @property
     def parent_id(self) -> int:
-        return self._record["ParentLayer"].loc[self._idx]
+        return self.metadata.parent_layer
 
     @property
     def children_ids(self) -> List[int]:
@@ -115,7 +125,7 @@ class ClipLayer:
 
     @property
     def visible(self) -> bool:
-        return self._record["LayerVisibility"].loc[self._idx] != 0
+        return self.metadata.layer_visibility != 0
 
     @visible.setter
     def visible(self, value: bool) -> None:
@@ -123,8 +133,7 @@ class ClipLayer:
 
     @property
     def opacity(self) -> float:
-        ## TODO: WILL LIKELY FAIL
-        return float(self._record["LayerOpacity"].loc[self._idx]) / 256.0
+        return self.metadata.layer_opacity / 256.0
 
     @opacity.setter
     def opacity(self, value: float) -> None:
@@ -138,11 +147,9 @@ class ClipLayer:
 
     @property
     def bbox(self) -> Tuple[int, int, int, int]:
-        layer_metadata = self._record.loc[self._idx]
+        meta = self.metadata
 
-        if "TextLayerType" in layer_metadata.keys() and not np.isnan(
-            layer_metadata["TextLayerType"]
-        ):
+        if meta.text_layer_type is not None and meta.text_layer_attributes is not None:
             if DEBUG:
                 if not os.path.exists("temp/text_attributes"):
                     os.makedirs("temp/text_attributes")
@@ -150,60 +157,41 @@ class ClipLayer:
                     f"temp/text_attributes/{self.layer_id}_text_attribute.binary",
                     mode="wb",
                 ) as f:
-                    f.write(layer_metadata["TextLayerAttributes"])
+                    f.write(meta.text_layer_attributes)
 
             try:
                 if self._text_attrs is None:
                     self._text_attrs = process_text_attributes(
-                        layer_metadata["TextLayerAttributes"]
+                        meta.text_layer_attributes
                     )
 
                 attr_ds = self._text_attrs
-
-                layer_offset_x = (
-                    layer_metadata["LayerOffsetX"] + attr_ds.general_offset_x
-                )
-                layer_offset_y = (
-                    layer_metadata["LayerOffsetY"] + attr_ds.general_offset_y
-                )
+                layer_offset_x = meta.layer_offset_x + attr_ds.general_offset_x
+                layer_offset_y = meta.layer_offset_y + attr_ds.general_offset_y
             except Exception:
                 print(
                     f"WARNING: Text attribute layer load failed for layer_id: {self.layer_id}"
                 )
-                layer_offset_x = layer_metadata["LayerOffsetX"]
-                layer_offset_y = layer_metadata["LayerOffsetY"]
-
+                layer_offset_x = meta.layer_offset_x
+                layer_offset_y = meta.layer_offset_y
         else:
             layer_offset_x = 0
             layer_offset_y = 0
 
-        if "DrawToRenderOffscreenType" in layer_metadata.keys() and not np.isnan(
-            layer_metadata["DrawToRenderOffscreenType"]
-        ):
-            pass
-        else:
-            if (
-                "LayerRenderOffscrOffsetX" in layer_metadata.keys()
-                and layer_metadata["LayerRenderOffscrOffsetX"]
-            ):
-                layer_offset_x += layer_metadata["LayerRenderOffscrOffsetX"]
-            if (
-                "LayerRenderOffscrOffsetY" in layer_metadata.keys()
-                and layer_metadata["LayerRenderOffscrOffsetY"]
-            ):
-                layer_offset_y += layer_metadata["LayerRenderOffscrOffsetY"]
+        # Once the layer's offscreen has been refreshed, render-offscreen
+        # offsets are already baked into the offscreen and we shouldn't add
+        # them again. DrawToRenderOffscreenType is the dirty/applied flag.
+        if meta.draw_to_render_offscreen_type is None:
+            layer_offset_x += meta.layer_render_offscr_offset_x
+            layer_offset_y += meta.layer_render_offscr_offset_y
 
-        if "LayerOffsetX" in layer_metadata.keys() and layer_metadata["LayerOffsetX"]:
-            layer_offset_x += layer_metadata["LayerOffsetX"]
-        if "LayerOffsetY" in layer_metadata.keys() and layer_metadata["LayerOffsetY"]:
-            layer_offset_y += layer_metadata["LayerOffsetY"]
+        layer_offset_x += meta.layer_offset_x
+        layer_offset_y += meta.layer_offset_y
 
         return (layer_offset_x, layer_offset_y, 0, 0)
 
     def is_group(self) -> bool:
-        return bool(
-            self._record.loc[self._idx]["LayerFolder"] & LayerFolderBit.IS_FOLDER
-        )
+        return bool(self.metadata.layer_folder & LayerFolderBit.IS_FOLDER)
 
     def __iter__(self) -> Iterator[ClipLayer]:
         return iter(self._children)
@@ -213,22 +201,17 @@ class ClipLayer:
 
     def composite(self, prepended_layers=[]) -> Optional[Image.Image]:
         entry = self._raster.get(self.layer_id)
+        meta = self.metadata
 
         if entry is not None and entry.type in ("raster", "vector"):
             composited = entry.image
         elif self._composited is not None:
             composited = self._composited
-        elif (
-            "DrawColorEnable" in self._record.keys()
-            and self._record["DrawColorEnable"].loc[self._idx] == 1.0
-        ):
-            red = 255 * (self._record["DrawColorMainRed"].loc[self._idx] / (2**32 - 1))
-            green = 255 * (
-                self._record["DrawColorMainGreen"].loc[self._idx] / (2**32 - 1)
-            )
-            blue = 255 * (
-                self._record["DrawColorMainBlue"].loc[self._idx] / (2**32 - 1)
-            )
+        elif meta.draw_color_enable == 1.0:
+            scale = 255.0 / (2**32 - 1)
+            red = scale * (meta.draw_color_main_red or 0.0)
+            green = scale * (meta.draw_color_main_green or 0.0)
+            blue = scale * (meta.draw_color_main_blue or 0.0)
             bg_color = np.array([red, green, blue, 255], dtype=np.uint8)
             composited = np.zeros((*self._canvas_size, 4), dtype=np.uint8)
             composited[..., :4] = bg_color
@@ -261,12 +244,14 @@ class ClipLayer:
         layer_list is a list of tuples (id, image)
         """
 
-        def layer_composite(metadata) -> LayerComposite:
-            raw = metadata.get("LayerComposite", 0)
+        def layer_composite(meta: LayerRecord) -> LayerComposite:
             try:
-                return LayerComposite(int(raw))
-            except (ValueError, TypeError):
+                return LayerComposite(meta.layer_composite)
+            except ValueError:
                 return LayerComposite.NORMAL
+
+        def layer_alpha_lock(meta: LayerRecord) -> bool:
+            return bool(meta.layer_lock & LayerLockBit.ALPHA)
 
         def unpremultiply_rgba(arr: np.ndarray) -> np.ndarray:
             if arr.shape[-1] < 4:
@@ -290,24 +275,20 @@ class ClipLayer:
             if len(layer_img.shape) == 0:
                 continue
 
-            layer_metadata = self._record.loc[self._layer_map[layer_id]]
+            meta = layer.metadata
 
-            if (
-                "ResizableImageInfo" in layer_metadata.keys()
-                and layer_metadata["ResizableImageInfo"]
-            ):
+            if meta.resizable_image_info is not None:
                 if DEBUG:
-                    # Save as binary
                     if not os.path.exists("temp/resizable_image_info"):
                         os.makedirs("temp/resizable_image_info")
                     with open(
                         f"temp/resizable_image_info/{layer_id}_resizable_image_info.binary",
                         mode="wb",
                     ) as f:
-                        f.write(layer_metadata["ResizableImageInfo"])
+                        f.write(meta.resizable_image_info)
 
                 layer._resizable_image_attrs = process_resizable_image_attributes(
-                    layer_metadata["ResizableImageInfo"]
+                    meta.resizable_image_info
                 )
 
                 layer_buffer = np.zeros((*self._canvas_size, 4), dtype=np.uint8)
@@ -318,18 +299,23 @@ class ClipLayer:
                 layer_buffer = backward_mapping(
                     transform, layer_img, layer_buffer, polygon_coords
                 )
-                mode = layer_composite(layer_metadata)
+                mode = layer_composite(meta)
                 if mode == LayerComposite.NORMAL:
                     buffer = alpha_blend(buffer, layer_buffer, premultiplied=False)
                 else:
-                    buffer = composite_layer(buffer, layer_buffer, mode)
+                    buffer = composite_layer(
+                        buffer,
+                        layer_buffer,
+                        mode,
+                        preserve_transparency=layer_alpha_lock(meta),
+                    )
 
             else:
                 if layer_img is None:
                     logger.debug(f"Skipping None layer idx: {i}, id: {layer_id}")
                     continue
 
-                if layer_metadata["LayerVisibility"] == 0:
+                if meta.layer_visibility == 0:
                     logger.debug(f"Skipping {layer.name}")
                     continue
 
@@ -362,7 +348,7 @@ class ClipLayer:
                     layer_img = layer_img[:, :layer_width]
 
                 premultiplied = layer_type == "vector"
-                mode = layer_composite(layer_metadata)
+                mode = layer_composite(meta)
                 base_slice = buffer[
                     layer_offset_y : layer_offset_y + layer_height,
                     layer_offset_x : layer_offset_x + layer_width,
@@ -375,7 +361,12 @@ class ClipLayer:
                     blend_input = (
                         unpremultiply_rgba(layer_img) if premultiplied else layer_img
                     )
-                    composited = composite_layer(base_slice, blend_input, mode)
+                    composited = composite_layer(
+                        base_slice,
+                        blend_input,
+                        mode,
+                        preserve_transparency=layer_alpha_lock(meta),
+                    )
                 buffer[
                     layer_offset_y : layer_offset_y + layer_height,
                     layer_offset_x : layer_offset_x + layer_width,
