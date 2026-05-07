@@ -29,16 +29,39 @@ def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
 
     Pure: bytes in, structured strokes out. No DataFrame access, no
     rasterization. Renderers consume the returned list.
+
+    Per-stroke disk layout:
+
+    - 88-byte stroke header: magic(16) + n_ctrl/header_id(8) + bbox(16) +
+      primary_color(12) + secondary_color(12) + stroke_opacity_f64(8) +
+      brush_id_u32(4) + base_brush_size_f64(8) + random_seed_u32(4).
+    - Per control (88 bytes main, plus extras for CURVE/BEZIER):
+        +0x00 f64  point.x
+        +0x08 f64  point.y
+        +0x10..+0x1f i32×4 bbox
+        +0x20 u32  flags (bit 12 = size locked, bit 13 = flow locked)
+        +0x24 f32  pressure
+        +0x28 f32  velocity
+        +0x2c f32  smooth
+        +0x30 f32  angle_deg (tilt azimuth / stroke-tangent direction)
+        +0x34 f32  tilt_x
+        +0x38 f32  size (per-control SIZE multiplier; lock bit 12 protects)
+        +0x3c f32  flow (per-control FLOW multiplier; lock bit 13 protects)
+        +0x40 f32  stroke_opacity (outline broadcast scale)
+        +0x44 f32  outline_dx (selection-preview only)
+        +0x48 f32  outline_dy (selection-preview only)
+        +0x4c f32  pattern_cache_lo (runtime scratch)
+        +0x50 u32 / +0x54 i32  pattern_cache_hi (runtime scratch, 8-byte qword)
+      Then for CURVE: 16 extra bytes = one (f64, f64) curve handle.
+      For BEZIER: 32 extra bytes = two (f64, f64) handles (in, out).
     """
     header_spec = struct.Struct(">IIII")
     uint_spec = struct.Struct(">I")
     uint2_spec = struct.Struct(">II")
     color3_spec = struct.Struct(">III")
-    float_spec = struct.Struct(">f")
-    float2_spec = struct.Struct(">ff")
     double_spec = struct.Struct(">d")
     double2_spec = struct.Struct(">dd")
-    byte4_spec = struct.Struct(">BBBB")
+    ctrl_main_spec = struct.Struct(">dd iiii I fffffffffff I i")
 
     strokes: List[VectorStroke] = []
     pos = 0
@@ -58,7 +81,7 @@ def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
 
         data, pos = read_binary_spec(vb, uint2_spec, pos)
         num_control_points = data[0]
-        # data[1] is header_id (8321 or 33); see clip_tools/unknowns.md.
+        # data[1] is the per-stroke header id (observed values: 8321, 33).
 
         # 4× u32 stroke bbox (left, top, right, bottom) — read but unused
         # for rendering.
@@ -72,7 +95,7 @@ def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
             int((cb & 0xFF00) >> 8),
         )
 
-        # 3 × u32 color variants — see clip_tools/unknowns.md.
+        # 3 × u32 secondary / variant color slots (not used by renderer).
         pos += 12
 
         data, pos = read_binary_spec(vb, double_spec, pos)
@@ -84,76 +107,71 @@ def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
         data, pos = read_binary_spec(vb, double_spec, pos)
         brush_size = data[0] * 2.0
 
-        ctrl = (
-            num_control_points + 1 if vtype == VectorType.BEZIER else num_control_points
-        )
-        first = True
+        # Per-stroke random seed used by Random-flag effectors (spray /
+        # ribbon paths) and per-stamp jitter. Stored in the blob right
+        # after ``base_brush_size``. The line-stamp size/flow paths run
+        # with random gating off and ignore it.
+        data, pos = read_binary_spec(vb, uint_spec, pos)
+        random_seed = data[0]
+
         points: List[VectorPoint] = []
 
-        for i in range(ctrl):
-            # Per-point stroke_id (4 bytes) and cumulative_param (uint32 except first).
-            pos += 4
-            if not first:
-                pos += 4
-
-            data, pos = read_binary_spec(vb, double2_spec, pos)
-            px, py = data
-
-            if vtype == VectorType.BEZIER:
-                # Bezier control handles — captured but not yet wired into
-                # the sampler. See clip_tools/unknowns.md.
-                if i == 1 or i == ctrl - 2:
-                    pos += 32
-                if i == ctrl - 1:
-                    pos += 16
-                    if first:
-                        first = False
-                    continue
+        for _ in range(num_control_points):
+            (
+                (
+                    px,
+                    py,
+                    _bbox0,
+                    _bbox1,
+                    _bbox2,
+                    _bbox3,
+                    flags,
+                    pressure,
+                    velocity,
+                    smooth,
+                    angle_deg,
+                    tilt_x,
+                    size,
+                    flow,
+                    p_stroke_opacity,
+                    outline_dx,
+                    outline_dy,
+                    pattern_cache_lo,
+                    pattern_cache_u32,
+                    _pattern_cache_i32,
+                ),
+                pos,
+            ) = read_binary_spec(vb, ctrl_main_spec, pos)
 
             curve = None
-            if vtype == VectorType.CURVE and not first:
+            if vtype == VectorType.CURVE:
                 data, pos = read_binary_spec(vb, double2_spec, pos)
                 curve = (data[0], data[1])
-
-            # Per-point bbox + flags.
-            pos += 16
-            pos += 4
-
-            data, pos = read_binary_spec(vb, float2_spec, pos)
-            pressure = data[0]
-
-            data, pos = read_binary_spec(vb, float_spec, pos)
-            size_modulation = data[0]
-
-            # pressure_range — always (0.0, 1.0); see clip_tools/unknowns.md.
-            pos += 8
-
-            data, pos = read_binary_spec(vb, float2_spec, pos)
-            width_factor, opacity_factor = data
-
-            # tilt_xy + rotation + texture_seed — see clip_tools/unknowns.md.
-            pos += 8 + 4 + 4
+            elif vtype == VectorType.BEZIER:
+                # Two (f64, f64) handles: in-handle and out-handle. Stored
+                # but not yet consumed by the cubic-Bezier sampler.
+                pos += 32
 
             points.append(
                 VectorPoint(
                     x=px,
                     y=py,
                     pressure=pressure,
-                    width_factor=width_factor,
-                    opacity_factor=opacity_factor,
-                    size_modulation=size_modulation,
+                    velocity=velocity,
+                    smooth=smooth,
+                    angle_deg=angle_deg,
+                    tilt_x=tilt_x,
+                    size=size,
+                    flow=flow,
+                    stroke_opacity=p_stroke_opacity,
+                    outline_dx=outline_dx,
+                    outline_dy=outline_dy,
+                    pattern_cache_lo=pattern_cache_lo,
+                    pattern_cache_hi=pattern_cache_u32,
+                    flags=flags,
                     curve=curve,
                 )
             )
-
-            if first:
-                first = False
-
-        # Stroke trailers — see clip_tools/unknowns.md.
-        if vtype == VectorType.STANDARD or vtype == VectorType.CURVE:
-            pos += 8  # tail_id (4) + tail_param (4)
-        if vtype == VectorType.CURVE:
-            pos += 16  # curve_trailer
 
         strokes.append(
             VectorStroke(
@@ -163,6 +181,7 @@ def parse_vector_binary(vb: bytes) -> List[VectorStroke]:
                 brush_size=brush_size,
                 brush_id=brush_id,
                 points=points,
+                random_seed=random_seed,
             )
         )
 
@@ -195,17 +214,17 @@ def rasterize_polylines(
             if len(match) and match.iloc[0]["CompositeMode"] in [27]:
                 stroke_op = 0
 
-        flat: List[Tuple[float, float, float]] = []
+        flat: List[Tuple[float, float]] = []
         for p in st.points:
-            flat.append((p.x, p.y, p.opacity_factor))
+            flat.append((p.x, p.y))
             if p.curve is not None:
-                flat.append((p.curve[0], p.curve[1], p.opacity_factor))
+                flat.append((p.curve[0], p.curve[1]))
 
         r, g, b = st.color
+        alpha = int(stroke_op * 255)
         for i in range(len(flat) - 1):
-            x0, y0, op0 = flat[i]
-            x1, y1, _ = flat[i + 1]
-            alpha = int(stroke_op * op0 * 255)
+            x0, y0 = flat[i]
+            x1, y1 = flat[i + 1]
             rr, cc = line(int(y0), int(x0), int(y1), int(x1))
             in_bounds = (rr >= 0) & (rr < h) & (cc >= 0) & (cc < w)
             arr[rr[in_bounds], cc[in_bounds]] = (r, g, b, alpha)

@@ -3,6 +3,8 @@ from typing import List, Optional
 
 import numpy as np
 
+from clip_tools.structs.blob_parsers import BrushEffector, parse_brush_effector
+
 
 @dataclass
 class LayerEntry:
@@ -27,19 +29,39 @@ class ExternalIdEntry:
 
 @dataclass
 class VectorPoint:
-    """One control point of a parsed vector stroke."""
+    """One control point of a parsed vector stroke.
+
+    Modulator inputs (pressure / velocity / smooth / tilt) are read directly
+    off the per-control disk record — they're baked into the saved stroke at
+    draw time, not re-derived on reload. `size` and `flow` are per-control
+    multipliers; lock bits in `flags` decide whether they're used as literal
+    overrides (locked) or fed through the brush effector chain (unlocked).
+    """
 
     x: float
     y: float
     pressure: float
-    width_factor: float
-    opacity_factor: float
-    # Per-point size modulation stored alongside each control point. Varies
-    # across a stroke as a bell/taper profile (peak in the middle, zero at
-    # endpoints), encoding pressure / velocity response. Multiplies
-    # brush_size to get the rendered diameter.
-    size_modulation: float = 1.0
+    velocity: float = 0.0
+    smooth: float = 0.0
+    angle_deg: float = 0.0  # +0x50 BE f32: tilt azimuth / stroke-tangent angle, deg
+    tilt_x: float = 0.0
+    size: float = 1.0  # per-control SIZE multiplier (lock bit 12)
+    flow: float = 1.0  # per-control FLOW multiplier (lock bit 13)
+    stroke_opacity: float = 0.0  # +0x60: outline broadcast scale
+    outline_dx: float = 0.0  # +0x64: outline-preview delta (selection only)
+    outline_dy: float = 0.0  # +0x68: outline-preview delta (selection only)
+    pattern_cache_lo: float = 0.0  # +0x6c: runtime pattern-resume scratch
+    pattern_cache_hi: int = 0  # +0x70..+0x77: same scratch (8-byte qword half)
+    flags: int = 0  # bit 12 = size locked, bit 13 = flow locked
     curve: Optional[tuple] = None  # (cx, cy) for CURVE-type quadratic handles
+
+    @property
+    def lock_size(self) -> bool:
+        return bool(self.flags & 0x1000)
+
+    @property
+    def lock_flow(self) -> bool:
+        return bool(self.flags & 0x2000)
 
 
 @dataclass
@@ -52,6 +74,10 @@ class VectorStroke:
     brush_size: float
     brush_id: int
     points: list  # list[VectorPoint]
+    # Per-stroke random seed read out of the blob header. Spray / ribbon
+    # paths feed this to the RNG so re-renders match the saved randomness;
+    # size/flow effector chains run with random gating off and ignore it.
+    random_seed: int = 0
 
 
 @dataclass
@@ -61,9 +87,22 @@ class VectorSample:
     x: float
     y: float
     pressure: float
-    width_factor: float
-    opacity_factor: float
-    size_modulation: float = 1.0
+    velocity: float = 0.0
+    smooth: float = 0.0
+    tilt_x: float = 0.0
+    angle_deg: float = 0.0
+    size: float = 1.0
+    flow: float = 1.0
+    stroke_opacity: float = 0.0
+    flags: int = 0
+
+    @property
+    def lock_size(self) -> bool:
+        return bool(self.flags & 0x1000)
+
+    @property
+    def lock_flow(self) -> bool:
+        return bool(self.flags & 0x2000)
 
 
 @dataclass
@@ -94,7 +133,7 @@ class BrushStyle:
     interval_base: float
     auto_interval_type: int
 
-    # Rotation (per-stamp)
+    # Rotation (per-stroke)
     rotation_base: float  # in degrees
     rotation_random: float  # [0,1] random component
     rotation_effector: (
@@ -117,12 +156,38 @@ class BrushStyle:
     spray_density_base: float
     spray_bias: float
 
-    # Raw pressure-curve effector blobs — not parsed yet, kept as bytes.
-    size_effector: bytes = b""
-    opacity_effector: bytes = b""
-    flow_effector: bytes = b""
-    thickness_effector: bytes = b""
-    interval_effector: bytes = b""
+    # Decoded pressure / dynamics effectors. `None` when the corresponding
+    # SQLite column is empty (= no per-stamp modulation for that channel).
+    size_effector: Optional[BrushEffector] = None
+    opacity_effector: Optional[BrushEffector] = None
+    flow_effector: Optional[BrushEffector] = None
+    thickness_effector: Optional[BrushEffector] = None
+    interval_effector: Optional[BrushEffector] = None
+    # Spray-specific size and density effectors.
+    spray_size_effector: Optional[BrushEffector] = None
+    spray_density_effector: Optional[BrushEffector] = None
+
+    # Dispatcher bit field. Bit 5 set → bend brush; bit 5 clear → spray
+    # brush (which subsumes single-stamp basic brushes via num_stamps=1).
+    style_flag: int = 0
+
+    # Per-stamp rotation inside spray. Bit 7 of ``rotation_effector_in_spray``
+    # gates the per-stamp jitter RNG draw; ``rotation_random_in_spray`` is
+    # the jitter amplitude.
+    rotation_in_spray_base: float = 0.0
+    rotation_effector_in_spray: int = 0
+    rotation_random_in_spray: float = 0.0
+
+    # Per-stamp colour-jitter effectors. Each draws an RNG value when its
+    # ``random`` modulator is present. We don't apply the jittered colour
+    # (the renderer paints the stroke's flat colour), but we still need
+    # the fields parsed so callers can reason about per-brush behaviour.
+    sub_color_effector: Optional[BrushEffector] = None
+    hue_change_effector: Optional[BrushEffector] = None
+    saturation_change_effector: Optional[BrushEffector] = None
+    value_change_effector: Optional[BrushEffector] = None
+    mix_color_effector: Optional[BrushEffector] = None
+    mix_alpha_effector: Optional[BrushEffector] = None
 
     @classmethod
     def from_row(cls, row) -> "BrushStyle":
@@ -148,6 +213,10 @@ class BrushStyle:
             v = row[key]
             return v if isinstance(v, (bytes, bytearray)) else b""
 
+        def as_effector(key):
+            blob = as_bytes(key)
+            return parse_brush_effector(blob if blob else None)
+
         return cls(
             main_id=as_int("MainId"),
             pattern_style=as_int("PatternStyle"),
@@ -161,6 +230,9 @@ class BrushStyle:
             rotation_base=as_float("RotationBase"),
             rotation_random=as_float("RotationRandom"),
             rotation_effector=as_int("RotationEffector"),
+            rotation_in_spray_base=as_float("RotationInSprayBase"),
+            rotation_effector_in_spray=as_int("RotationEffectorInSpray"),
+            rotation_random_in_spray=as_float("RotationRandomInSpray"),
             texture_scale=as_float("TextureScale", 1.0),
             texture_rotate=as_float("TextureRotate"),
             texture_offset_x=as_float("TextureOffsetX"),
@@ -171,11 +243,20 @@ class BrushStyle:
             spray_size_base=as_float("SpraySizeBase"),
             spray_density_base=as_float("SprayDensityBase"),
             spray_bias=as_float("SprayBias"),
-            size_effector=as_bytes("SizeEffector"),
-            opacity_effector=as_bytes("OpacityEffector"),
-            flow_effector=as_bytes("FlowEffector"),
-            thickness_effector=as_bytes("ThicknessEffector"),
-            interval_effector=as_bytes("IntervalEffector"),
+            size_effector=as_effector("SizeEffector"),
+            opacity_effector=as_effector("OpacityEffector"),
+            flow_effector=as_effector("FlowEffector"),
+            thickness_effector=as_effector("ThicknessEffector"),
+            interval_effector=as_effector("IntervalEffector"),
+            spray_size_effector=as_effector("SpraySizeEffector"),
+            spray_density_effector=as_effector("SprayDensityEffector"),
+            style_flag=as_int("StyleFlag"),
+            sub_color_effector=as_effector("SubColorEffector"),
+            hue_change_effector=as_effector("HueChangeEffector"),
+            saturation_change_effector=as_effector("SaturationChangeEffector"),
+            value_change_effector=as_effector("ValueChangeEffector"),
+            mix_color_effector=as_effector("MixColorEffector"),
+            mix_alpha_effector=as_effector("MixAlphaEffector"),
         )
 
 

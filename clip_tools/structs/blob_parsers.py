@@ -78,71 +78,174 @@ def parse_small_object_flag(blob: Optional[bytes]) -> Optional[SmallObjectFlag]:
 
 
 # ---------------------------------------------------------------------------
-# BrushStyle.*Effector — pressure / dynamics curves
+# BrushStyle.*Effector — per-stamp parameter modulator blobs
 # ---------------------------------------------------------------------------
+#
+# Layout: 4-byte flags + variable-size modulator blocks in flag-bit order.
+# Each set bit pulls in its modulator block at a fixed size:
+#
+#   Bit 0x10  Pressure : f32 min + u32 curve_id      (8B)
+#   Bit 0x20  Velocity : f32 min + u32 curve_id + f32 max  (12B)
+#   Bit 0x40  Smooth   : f32 min                     (4B)
+#   Bit 0x80  Random   : f32 min                     (4B)
+#   Bit 0x100 Tilt     : f32 min                     (4B)
+#   Bit 0x01  master "effector enabled" flag (always set in observed blobs)
+#
+# `curve_id` is a foreign key into `BrushEffectorGraphData.MainId` whose
+# `control_points` define the input→output curve for that modulator. NULL /
+# missing curve falls back to identity linear `[(0,0), (1,1)]`.
+
+
+EFFECTOR_FLAG_ENABLED = 0x01
+EFFECTOR_FLAG_PRESSURE = 0x10
+EFFECTOR_FLAG_VELOCITY = 0x20
+EFFECTOR_FLAG_SMOOTH = 0x40
+EFFECTOR_FLAG_RANDOM = 0x80
+EFFECTOR_FLAG_TILT = 0x100
+
+
+@dataclass
+class EffectorPressure:
+    min: float  # output multiplier at pressure=0  (curve_y * (1-min) + min)
+    curve_id: int  # FK into BrushEffectorGraphData.MainId; 0 = identity
+
+
+@dataclass
+class EffectorVelocity:
+    min: float
+    curve_id: int
+    # `max` lives after the trailing version field in the blob, gated by a
+    # version check inside `LoadEffector`. Defaults to 1.0 when the version
+    # check fails or the blob is too short to include it.
+    max: float = 1.0
+
+
+@dataclass
+class EffectorSmooth:
+    min: float
+
+
+@dataclass
+class EffectorRandom:
+    min: float
+
+
+@dataclass
+class EffectorTilt:
+    min: float
 
 
 @dataclass
 class BrushEffector:
-    """A `BrushStyle.*Effector` blob (`SizeEffector`, `OpacityEffector`, ...).
+    """A decoded `BrushStyle.*Effector` blob.
 
-    Layout (observed across `wn_04_009_LOSA.clip` brushes):
-
-    - `effector_id : u32`  flags / type. `0` (alone) means "no curve".
-    - `unknown_u32 : u32`  always 0 in samples.
-    - `param_count : u32`  number of `(input_index, value)` pairs that follow.
-    - For each param: `(input_index : u32, value)` where `value` may be a
-      ref into `BrushEffectorGraphData.MainId` (when stored as u32) or a
-      f32 scalar — the discriminator is encoded inside `effector_id` and
-      not yet fully unpicked.
-
-    For now the dataclass holds the decoded header + the raw param tail.
-    Renderers needing the curve resolve `param_count` and the byte tail
-    against `BrushEffectorGraphData` themselves.
+    Each modulator is `None` if its flag bit is unset. Render-time evaluation
+    chains the present modulators in flag-bit order; missing ones contribute
+    an identity multiplier (1.0).
     """
 
-    effector_id: int
-    unknown_u32: int
-    param_count: int
-    param_tail: bytes
-    raw: bytes
+    flags: int  # raw flag bits (per-modulator + low version/init bits)
+    pressure: Optional[EffectorPressure] = None
+    velocity: Optional[EffectorVelocity] = None
+    smooth: Optional[EffectorSmooth] = None
+    random: Optional[EffectorRandom] = None
+    tilt: Optional[EffectorTilt] = None
+    version: int = 0  # trailing `version_or_size` field; gates velocity_max
+    raw: bytes = b""
 
     @property
     def is_no_op(self) -> bool:
-        return self.effector_id == 0 and len(self.raw) <= 4
+        """True if the effector has no enabled modulators (just a stub)."""
+        return (
+            self.pressure is None
+            and self.velocity is None
+            and self.smooth is None
+            and self.random is None
+            and self.tilt is None
+        )
 
 
 def parse_brush_effector(blob: Optional[bytes]) -> Optional[BrushEffector]:
-    if blob is None:
+    """Decode a ``BrushStyle.*Effector`` blob to a ``BrushEffector`` dataclass.
+
+    Layout::
+
+        flags                  : BE u32
+        if flags & 0x10:       # Pressure
+            pressure_min       : BE f32
+            pressure_curve_id  : BE u32
+        if flags & 0x20:       # Velocity
+            velocity_min       : BE f32
+            velocity_curve_id  : BE u32
+        if flags & 0x40:       # Smooth
+            smooth_min         : BE f32
+        if flags & 0x80:       # Random
+            random_min         : BE f32
+        if flags & 0x100:      # Tilt
+            tilt_min           : BE f32
+        version_or_size        : BE u32 (optional, present in observed samples)
+        if (version_check) and (flags & 0x20):
+            velocity_max       : BE f32 (else defaults to 1.0)
+
+    Returns `None` on empty / too-short input. A 4-byte stub (just flags)
+    decodes to an effector with all modulators `None`.
+    """
+    if blob is None or len(blob) < 4:
         return None
-    if len(blob) < 4:
-        return None
-    if len(blob) == 4:
-        # Stub: just an effector_id.
-        (eid,) = struct.unpack(">I", blob)
-        return BrushEffector(
-            effector_id=eid,
-            unknown_u32=0,
-            param_count=0,
-            param_tail=b"",
-            raw=bytes(blob),
-        )
-    if len(blob) < 12:
-        # Truncated header; treat conservatively as a stub.
-        return BrushEffector(
-            effector_id=struct.unpack(">I", blob[:4])[0],
-            unknown_u32=0,
-            param_count=0,
-            param_tail=bytes(blob[4:]),
-            raw=bytes(blob),
-        )
-    eid, unk, pcount = struct.unpack(">3I", blob[:12])
+    raw = bytes(blob)
+    flags = struct.unpack(">I", raw[:4])[0]
+    pos = 4
+
+    pressure = None
+    velocity = None
+    smooth = None
+    random_ = None
+    tilt = None
+    version = 0
+
+    if flags & EFFECTOR_FLAG_PRESSURE and pos + 8 <= len(raw):
+        p_min, p_curve = struct.unpack(">fI", raw[pos : pos + 8])
+        pressure = EffectorPressure(min=p_min, curve_id=p_curve)
+        pos += 8
+
+    if flags & EFFECTOR_FLAG_VELOCITY and pos + 8 <= len(raw):
+        v_min, v_curve = struct.unpack(">fI", raw[pos : pos + 8])
+        velocity = EffectorVelocity(min=v_min, curve_id=v_curve)
+        pos += 8
+
+    if flags & EFFECTOR_FLAG_SMOOTH and pos + 4 <= len(raw):
+        (s_min,) = struct.unpack(">f", raw[pos : pos + 4])
+        smooth = EffectorSmooth(min=s_min)
+        pos += 4
+
+    if flags & EFFECTOR_FLAG_RANDOM and pos + 4 <= len(raw):
+        (r_min,) = struct.unpack(">f", raw[pos : pos + 4])
+        random_ = EffectorRandom(min=r_min)
+        pos += 4
+
+    if flags & EFFECTOR_FLAG_TILT and pos + 4 <= len(raw):
+        (t_min,) = struct.unpack(">f", raw[pos : pos + 4])
+        tilt = EffectorTilt(min=t_min)
+        pos += 4
+
+    # ``velocity_max`` is read directly after ``tilt_min`` (no separate
+    # version field; for short blobs this read short-circuits via the
+    # bounds check).
+    version = 0
+    if velocity is not None and pos + 4 <= len(raw):
+        (v_max,) = struct.unpack(">f", raw[pos : pos + 4])
+        velocity.max = v_max
+        pos += 4
+
     return BrushEffector(
-        effector_id=eid,
-        unknown_u32=unk,
-        param_count=pcount,
-        param_tail=bytes(blob[12:]),
-        raw=bytes(blob),
+        flags=flags,
+        pressure=pressure,
+        velocity=velocity,
+        smooth=smooth,
+        random=random_,
+        tilt=tilt,
+        version=version,
+        raw=raw,
     )
 
 
