@@ -2,6 +2,7 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 from .offscreen_attributes import process_offscreen_attributes
+from .encode_blocks import decode_pixel_block
 
 import struct
 
@@ -9,7 +10,6 @@ import struct
 def process_layer_blocks(
     blocks: List[Tuple[int, bytes]], offscreen: pd.Series
 ) -> np.ndarray:
-    ALPHA_SUBBLOCK_WIDTH = 64
     PARAMETER_HEADER = "Parameter".encode("utf-16be")
     parameter_header_spec = struct.Struct(">II")
 
@@ -59,33 +59,8 @@ def process_layer_blocks(
             main_img[..., 1] = temp_img[block_height:, :]
             main_img[..., 1] = 255
         else:
-            shape = [block_height + ALPHA_SUBBLOCK_WIDTH, block_width, num_channels]
-            img_data = np.frombuffer(block_data, dtype=dt).reshape(shape).copy()
-
-            main_img = img_data[ALPHA_SUBBLOCK_WIDTH:]
-
-            mip_0 = img_data[0:ALPHA_SUBBLOCK_WIDTH, 0:ALPHA_SUBBLOCK_WIDTH]
-            mip_1 = img_data[
-                0:ALPHA_SUBBLOCK_WIDTH, ALPHA_SUBBLOCK_WIDTH : ALPHA_SUBBLOCK_WIDTH * 2
-            ]
-            mip_2 = img_data[
-                0:ALPHA_SUBBLOCK_WIDTH,
-                ALPHA_SUBBLOCK_WIDTH * 2 : ALPHA_SUBBLOCK_WIDTH * 3,
-            ]
-            mip_3 = img_data[
-                0:ALPHA_SUBBLOCK_WIDTH,
-                ALPHA_SUBBLOCK_WIDTH * 3 : ALPHA_SUBBLOCK_WIDTH * 4,
-            ]
-            mips = [mip_0, mip_1, mip_2, mip_3]
-
-            stacked = np.concatenate(mips, axis=-1)
-            reshaped = stacked.reshape(64, 64, 4, 4)
-            swapped = reshaped.swapaxes(1, 2)
-            final_array = swapped.reshape(block_height, block_width)
-            main_img[..., 3] = final_array
-
-            # Create the image
-            main_img[:, :, [0, 2]] = main_img[:, :, [2, 0]]
+            # RGBA: decode via the shared codec (inverse of encode_pixel_block).
+            main_img = decode_pixel_block(block_data, block_width, block_height)
 
         buffer[
             (block_idx // num_cols) * block_height : ((block_idx // num_cols) + 1)

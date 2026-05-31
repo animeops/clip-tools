@@ -33,6 +33,11 @@ from .offscreen_attributes import (
     process_offscreen_attributes,
 )
 from .layer_blocks import process_layer_blocks
+from .encode_blocks import (
+    decode_pixel_block,
+    encode_pixel_block,
+    tile_image_to_blocks,
+)
 from .text_attributes import (
     FontAlias,
     FontAliases,
@@ -54,6 +59,9 @@ __all__ = [
     "ChunkHeader",
     "CompLayerInfo",
     "CompLayerInfoEntry",
+    "decode_pixel_block",
+    "encode_pixel_block",
+    "tile_image_to_blocks",
     "EffectorPressure",
     "EffectorRandom",
     "EffectorSmooth",
